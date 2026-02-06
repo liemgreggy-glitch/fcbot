@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Macau Lottery Telegram Bot 
+Macau Lottery Telegram Bot (澳门六合彩预测机器人)
 Complete bot with prediction, analysis, and automation features
 """
 
@@ -56,18 +56,18 @@ logger = logging.getLogger(__name__)
 
 # Zodiac mapping (correct mapping verified with real API data)
 ZODIAC_NUMBERS = {
-    '鼠': [6, 18, 30, 42],
-    '牛': [5, 17, 29, 41],
-    '虎': [4, 16, 28, 40],
-    '兔': [3, 15, 27, 39],
-    '龙': [2, 14, 26, 38],
-    '蛇': [1, 13, 25, 37, 49],
+    '鼠': [06, 18, 30, 42],
+    '牛': [05, 17, 29, 41],
+    '虎': [04, 16, 28, 40],
+    '兔': [03, 15, 27, 39],
+    '龙': [02, 14, 26, 38],
+    '蛇': [01, 13, 25, 37, 49],
     '马': [12, 24, 36, 48],
     '羊': [11, 23, 35, 47],
     '猴': [10, 22, 34, 46],
-    '鸡': [9, 21, 33, 45],
-    '狗': [8, 20, 32, 44],
-    '猪': [7, 19, 31, 43]
+    '鸡': [09, 21, 33, 45],
+    '狗': [08, 20, 32, 44],
+    '猪': [07, 19, 31, 43]
 }
 
 # Zodiac emoji mapping
