@@ -221,19 +221,25 @@ class DatabaseHandler:
         return self.get_user_settings(user_id)
     
     def update_user_setting(self, user_id: int, setting: str, value: int):
-        """Update user setting"""
-        # Validate setting name to prevent SQL injection
-        allowed_settings = ['notify_enabled', 'reminder_enabled', 'auto_predict', 'default_period']
+        """Update user setting with secure column validation"""
+        # Whitelist of allowed settings to prevent SQL injection
+        allowed_settings = {
+            'notify_enabled': 'notify_enabled',
+            'reminder_enabled': 'reminder_enabled',
+            'auto_predict': 'auto_predict',
+            'default_period': 'default_period'
+        }
+        
         if setting not in allowed_settings:
             raise ValueError(f"Invalid setting: {setting}")
         
+        # Use validated column name
+        column_name = allowed_settings[setting]
+        
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute(f'''
-            UPDATE user_settings 
-            SET {setting} = ?, updated_at = CURRENT_TIMESTAMP 
-            WHERE user_id = ?
-        ''', (value, user_id))
+        query = f'UPDATE user_settings SET {column_name} = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+        cursor.execute(query, (value, user_id))
         conn.commit()
         conn.close()
     
