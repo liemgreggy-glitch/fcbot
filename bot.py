@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Macau Lottery Telegram Bot (澳门六合彩预测机器人)
+Macau Lottery Telegram Bot 
 Complete bot with prediction, analysis, and automation features
 """
 
