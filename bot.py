@@ -121,14 +121,15 @@ class DatabaseHandler:
                 user_id INTEGER PRIMARY KEY,
                 notify_enabled INTEGER DEFAULT 1,
                 reminder_enabled INTEGER DEFAULT 0,
+                auto_predict_reminder INTEGER DEFAULT 1,
                 auto_predict INTEGER DEFAULT 0,
-                default_period INTEGER DEFAULT 10,
+                default_period INTEGER DEFAULT 50,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Prediction history table
+        # Prediction history table (legacy - kept for backward compatibility)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS prediction_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +141,32 @@ class DatabaseHandler:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Prediction records table (new enhanced version)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS prediction_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expect TEXT UNIQUE NOT NULL,
+                predict_zodiac1 TEXT NOT NULL,
+                predict_zodiac2 TEXT NOT NULL,
+                predict_numbers1 TEXT NOT NULL,
+                predict_numbers2 TEXT NOT NULL,
+                predict_score1 REAL NOT NULL,
+                predict_score2 REAL NOT NULL,
+                predict_time DATETIME NOT NULL,
+                actual_tema INTEGER,
+                actual_zodiac TEXT,
+                is_hit INTEGER DEFAULT 0,
+                hit_rank INTEGER,
+                analysis_data TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create indices for prediction_records
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pred_expect ON prediction_records(expect)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pred_is_hit ON prediction_records(is_hit)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pred_time ON prediction_records(predict_time DESC)')
         
         conn.commit()
         conn.close()
@@ -243,6 +270,7 @@ class DatabaseHandler:
             'notify_enabled': 'notify_enabled',
             'reminder_enabled': 'reminder_enabled',
             'auto_predict': 'auto_predict',
+            'auto_predict_reminder': 'auto_predict_reminder',
             'default_period': 'default_period'
         }
         
@@ -295,6 +323,172 @@ class DatabaseHandler:
         users = [row['user_id'] for row in cursor.fetchall()]
         conn.close()
         return users
+    
+    def can_predict(self, expect: str) -> bool:
+        """Check if prediction is allowed for this period"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM prediction_records WHERE expect = ?', (expect,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is None
+    
+    def save_zodiac_prediction(self, expect: str, zodiac1: str, zodiac2: str, 
+                               numbers1: List[int], numbers2: List[int],
+                               score1: float, score2: float, analysis_data: Dict) -> bool:
+        """Save zodiac prediction to database"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO prediction_records 
+                (expect, predict_zodiac1, predict_zodiac2, predict_numbers1, predict_numbers2,
+                 predict_score1, predict_score2, predict_time, analysis_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+            ''', (expect, zodiac1, zodiac2, 
+                  ','.join(map(str, numbers1)), ','.join(map(str, numbers2)),
+                  score1, score2, json.dumps(analysis_data, ensure_ascii=False)))
+            conn.commit()
+            logger.info(f"Saved zodiac prediction for {expect}: {zodiac1}, {zodiac2}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving zodiac prediction: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_prediction_record(self, expect: str) -> Optional[Dict]:
+        """Get prediction record for a specific period"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM prediction_records WHERE expect = ?', (expect,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'id': row['id'],
+                'expect': row['expect'],
+                'predict_zodiac1': row['predict_zodiac1'],
+                'predict_zodiac2': row['predict_zodiac2'],
+                'predict_numbers1': row['predict_numbers1'],
+                'predict_numbers2': row['predict_numbers2'],
+                'predict_score1': row['predict_score1'],
+                'predict_score2': row['predict_score2'],
+                'predict_time': row['predict_time'],
+                'actual_tema': row['actual_tema'],
+                'actual_zodiac': row['actual_zodiac'],
+                'is_hit': row['is_hit'],
+                'hit_rank': row['hit_rank'],
+                'analysis_data': json.loads(row['analysis_data']) if row['analysis_data'] else None
+            }
+        return None
+    
+    def update_prediction_result(self, expect: str, actual_tema: int, actual_zodiac: str):
+        """Update prediction record with actual result"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Get prediction
+        cursor.execute('SELECT predict_zodiac1, predict_zodiac2 FROM prediction_records WHERE expect = ?', (expect,))
+        record = cursor.fetchone()
+        
+        if record:
+            predict1, predict2 = record['predict_zodiac1'], record['predict_zodiac2']
+            
+            # Determine hit status
+            if actual_zodiac == predict1:
+                is_hit, hit_rank = 1, 1
+            elif actual_zodiac == predict2:
+                is_hit, hit_rank = 1, 2
+            else:
+                is_hit, hit_rank = 2, 0
+            
+            # Update record
+            cursor.execute('''
+                UPDATE prediction_records 
+                SET actual_tema = ?, actual_zodiac = ?, is_hit = ?, hit_rank = ?
+                WHERE expect = ?
+            ''', (actual_tema, actual_zodiac, is_hit, hit_rank, expect))
+            conn.commit()
+            logger.info(f"Updated prediction result for {expect}: {'HIT' if is_hit == 1 else 'MISS'}")
+        
+        conn.close()
+    
+    def get_prediction_history(self, limit: int = 10) -> List[Dict]:
+        """Get prediction history"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM prediction_records 
+            WHERE is_hit > 0
+            ORDER BY expect DESC 
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        results = []
+        for row in rows:
+            results.append({
+                'expect': row['expect'],
+                'predict_zodiac1': row['predict_zodiac1'],
+                'predict_zodiac2': row['predict_zodiac2'],
+                'actual_zodiac': row['actual_zodiac'],
+                'is_hit': row['is_hit'],
+                'hit_rank': row['hit_rank']
+            })
+        return results
+    
+    def calculate_hit_rate(self) -> Dict:
+        """Calculate prediction hit rate statistics"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Total predictions (with results)
+        cursor.execute('SELECT COUNT(*) as total FROM prediction_records WHERE is_hit > 0')
+        total = cursor.fetchone()['total']
+        
+        # Hit count
+        cursor.execute('SELECT COUNT(*) as hits FROM prediction_records WHERE is_hit = 1')
+        hits = cursor.fetchone()['hits']
+        
+        # Recent 10 periods
+        cursor.execute('''
+            SELECT COUNT(*) as recent_hits 
+            FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 10)
+            WHERE is_hit = 1
+        ''')
+        recent_10_hits = cursor.fetchone()['recent_hits']
+        
+        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 10)')
+        recent_10_total = cursor.fetchone()['recent_total']
+        
+        # Recent 5 periods
+        cursor.execute('''
+            SELECT COUNT(*) as recent_hits 
+            FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 5)
+            WHERE is_hit = 1
+        ''')
+        recent_5_hits = cursor.fetchone()['recent_hits']
+        
+        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 5)')
+        recent_5_total = cursor.fetchone()['recent_total']
+        
+        conn.close()
+        
+        return {
+            'total': total,
+            'hits': hits,
+            'hit_rate': (hits / total * 100) if total > 0 else 0,
+            'recent_10_hits': recent_10_hits,
+            'recent_10_total': recent_10_total,
+            'recent_10_rate': (recent_10_hits / recent_10_total * 100) if recent_10_total > 0 else 0,
+            'recent_5_hits': recent_5_hits,
+            'recent_5_total': recent_5_total,
+            'recent_5_rate': (recent_5_hits / recent_5_total * 100) if recent_5_total > 0 else 0
+        }
 
 
 class APIHandler:
@@ -609,6 +803,163 @@ class PredictionEngine:
         scores = {num: score for num, score in sorted_nums[:5]}
         
         return top5, scores
+    
+    def predict_top2_zodiac(self, period: int = 100) -> Dict:
+        """
+        Predict TOP 2 most likely zodiacs based on multi-dimensional analysis
+        
+        Analysis dimensions:
+        1. Frequency analysis (30% weight) - Recent appearance count
+        2. Missing analysis (30% weight) - Periods since last appearance
+        3. Cycle analysis (20% weight) - Deviation from expected frequency
+        4. Trend analysis (20% weight) - Recent 10 period trend
+        
+        Returns: TOP 2 zodiacs with detailed analysis data
+        """
+        history = self.db.get_history(period)
+        
+        if not history:
+            # Random selection if no history
+            all_zodiacs = list(ZODIAC_NUMBERS.keys())
+            selected = random.sample(all_zodiacs, 2)
+            return {
+                'zodiac1': selected[0],
+                'zodiac2': selected[1],
+                'numbers1': ZODIAC_NUMBERS[selected[0]],
+                'numbers2': ZODIAC_NUMBERS[selected[1]],
+                'score1': 50.0,
+                'score2': 45.0,
+                'analysis': {}
+            }
+        
+        # Build zodiac scores
+        zodiac_scores = {}
+        all_zodiacs = list(ZODIAC_NUMBERS.keys())
+        
+        for zodiac in all_zodiacs:
+            freq_score = self._calculate_frequency_score(history, zodiac, period)
+            missing_score = self._calculate_missing_score(history, zodiac)
+            cycle_score = self._calculate_cycle_score(history, zodiac, period)
+            trend_score = self._calculate_trend_score(history, zodiac)
+            
+            final_score = (
+                freq_score * 0.30 +
+                missing_score * 0.30 +
+                cycle_score * 0.20 +
+                trend_score * 0.20
+            )
+            
+            zodiac_scores[zodiac] = {
+                'score': final_score,
+                'freq': freq_score,
+                'missing': missing_score,
+                'cycle': cycle_score,
+                'trend': trend_score
+            }
+        
+        # Get TOP 2
+        sorted_zodiacs = sorted(zodiac_scores.items(), key=lambda x: x[1]['score'], reverse=True)
+        top2 = sorted_zodiacs[:2]
+        
+        zodiac1, analysis1 = top2[0]
+        zodiac2, analysis2 = top2[1]
+        
+        return {
+            'zodiac1': zodiac1,
+            'zodiac2': zodiac2,
+            'numbers1': ZODIAC_NUMBERS[zodiac1],
+            'numbers2': ZODIAC_NUMBERS[zodiac2],
+            'score1': analysis1['score'],
+            'score2': analysis2['score'],
+            'analysis': {
+                zodiac1: analysis1,
+                zodiac2: analysis2,
+                'all_scores': zodiac_scores
+            }
+        }
+    
+    def _calculate_frequency_score(self, history: List[Dict], zodiac: str, period: int) -> float:
+        """Calculate frequency score for a zodiac (lower frequency = higher score)"""
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        count = zodiac_list.count(zodiac)
+        expected = period / 12  # Expected frequency for 12 zodiacs
+        
+        # Score inversely proportional to frequency
+        if count == 0:
+            return 100.0
+        else:
+            deviation = expected - count
+            return min(100.0, max(0.0, 50.0 + deviation * 5))
+    
+    def _calculate_missing_score(self, history: List[Dict], zodiac: str) -> float:
+        """Calculate missing score (longer missing = higher score)"""
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        
+        # Find last appearance
+        try:
+            last_idx = zodiac_list.index(zodiac)
+            missing_periods = last_idx
+        except ValueError:
+            # Not found in history
+            missing_periods = len(zodiac_list)
+        
+        # Score based on missing periods
+        return min(100.0, missing_periods * 2)
+    
+    def _calculate_cycle_score(self, history: List[Dict], zodiac: str, period: int) -> float:
+        """Calculate cycle score based on theoretical expectation"""
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        count = zodiac_list.count(zodiac)
+        expected = period / 12
+        
+        # Favor zodiacs below expected frequency
+        if count < expected:
+            return min(100.0, (expected - count) / expected * 100)
+        else:
+            return max(0.0, 50.0 - (count - expected) * 5)
+    
+    def _calculate_trend_score(self, history: List[Dict], zodiac: str) -> float:
+        """Calculate trend score based on recent 10 periods"""
+        recent_10 = [h['tema_zodiac'] for h in history[:10]]
+        recent_count = recent_10.count(zodiac)
+        
+        # Favor zodiacs not appearing in recent 10
+        if recent_count == 0:
+            return 100.0
+        else:
+            return max(0.0, 100.0 - recent_count * 20)
+    
+    def get_zodiac_analysis_details(self, history: List[Dict], zodiac: str) -> Dict:
+        """Get detailed analysis for a zodiac"""
+        tema_list = [h['tema'] for h in history]
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        
+        # Count appearances
+        count = zodiac_list.count(zodiac)
+        
+        # Find missing periods
+        try:
+            last_idx = zodiac_list.index(zodiac)
+            current_missing = last_idx
+        except ValueError:
+            current_missing = len(zodiac_list)
+        
+        # Find all missing periods
+        missing_periods = []
+        for i, z in enumerate(zodiac_list):
+            if z == zodiac:
+                missing_periods.append(i)
+        
+        max_missing = max(missing_periods) if missing_periods else len(zodiac_list)
+        avg_missing = sum(missing_periods) / len(missing_periods) if missing_periods else len(zodiac_list)
+        
+        return {
+            'count': count,
+            'current_missing': current_missing,
+            'max_missing': max_missing,
+            'avg_missing': avg_missing,
+            'percentage': (count / len(zodiac_list) * 100) if zodiac_list else 0
+        }
     
     def get_hot_cold_analysis(self, period: int = 30) -> Dict:
         """Get hot and cold numbers analysis (1-49 range)"""
