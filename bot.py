@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Macau Lottery Telegram Bot (澳门六合彩预测机器人)
+Macau Lottery Telegram Bot 
 Complete bot with prediction, analysis, and automation features
 """
 
@@ -54,20 +54,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Zodiac mapping
+# Zodiac mapping (correct mapping verified with real API data)
 ZODIAC_NUMBERS = {
-    '鼠': [12, 24, 36, 48],
-    '牛': [11, 23, 35, 47],
-    '虎': [10, 22, 34, 46],
-    '兔': [9, 21, 33, 45],
-    '龙': [8, 20, 32, 44],
-    '蛇': [7, 19, 31, 43],
-    '马': [6, 18, 30, 42],
-    '羊': [5, 17, 29, 41],
-    '猴': [4, 16, 28, 40],
-    '鸡': [3, 15, 27, 39],
-    '狗': [2, 14, 26, 38, 50],
-    '猪': [1, 13, 25, 37, 49]
+    '鼠': [6, 18, 30, 42],
+    '牛': [5, 17, 29, 41],
+    '虎': [4, 16, 28, 40],
+    '兔': [3, 15, 27, 39],
+    '龙': [2, 14, 26, 38],
+    '蛇': [1, 13, 25, 37, 49],
+    '马': [12, 24, 36, 48],
+    '羊': [11, 23, 35, 47],
+    '猴': [10, 22, 34, 46],
+    '鸡': [9, 21, 33, 45],
+    '狗': [8, 20, 32, 44],
+    '猪': [7, 19, 31, 43]
 }
 
 # Zodiac emoji mapping
@@ -202,6 +202,15 @@ class DatabaseHandler:
             })
         return results
     
+    def is_database_empty(self) -> bool:
+        """Check if lottery history database is empty"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM lottery_history')
+        count = cursor.fetchone()['count']
+        conn.close()
+        return count == 0
+    
     def get_user_settings(self, user_id: int) -> Dict:
         """Get user settings"""
         conn = self.get_connection()
@@ -304,9 +313,16 @@ class APIHandler:
             
             if data and len(data) > 0:
                 latest = data[0]
-                open_code = [int(x) for x in latest['openCode'].split(',')]
+                open_code = [int(x.strip()) for x in latest['openCode'].split(',')]
+                
+                # Handle zodiac - could be a list or comma-separated string
+                if isinstance(latest.get('zodiac'), list):
+                    zodiacs = latest['zodiac']
+                else:
+                    zodiacs = [x.strip() for x in latest.get('zodiac', '').split(',')]
+                
                 tema = open_code[6]  # 7th number (index 6)
-                tema_zodiac = latest['zodiac'][6]  # 7th zodiac
+                tema_zodiac = zodiacs[6] if len(zodiacs) > 6 else NUMBER_TO_ZODIAC.get(tema, '未知')
                 
                 return {
                     'expect': latest['expect'],
@@ -329,10 +345,19 @@ class APIHandler:
             data = response.json()
             
             if data and 'openCode' in data:
-                open_code = [int(x) for x in data['openCode'].split(',')]
+                open_code = [int(x.strip()) for x in data['openCode'].split(',')]
                 if len(open_code) >= 7:
                     tema = open_code[6]
-                    tema_zodiac = data['zodiac'][6] if 'zodiac' in data else NUMBER_TO_ZODIAC.get(tema, '未知')
+                    
+                    # Handle zodiac - could be a list or comma-separated string
+                    if 'zodiac' in data:
+                        if isinstance(data['zodiac'], list):
+                            zodiacs = data['zodiac']
+                        else:
+                            zodiacs = [x.strip() for x in data['zodiac'].split(',')]
+                        tema_zodiac = zodiacs[6] if len(zodiacs) > 6 else NUMBER_TO_ZODIAC.get(tema, '未知')
+                    else:
+                        tema_zodiac = NUMBER_TO_ZODIAC.get(tema, '未知')
                     
                     return {
                         'expect': data['expect'],
@@ -350,15 +375,24 @@ class APIHandler:
     def get_history(year: int) -> List[Dict]:
         """Get historical results for a year"""
         try:
-            response = requests.get(f"{APIHandler.HISTORY_URL}/{year}", timeout=10)
+            response = requests.get(f"{APIHandler.HISTORY_URL}/{year}", timeout=30)
             response.raise_for_status()
             data = response.json()
             
+            # Handle new API format with result/code/data structure
+            if data.get('result') and data.get('code') == 200:
+                items = data.get('data', [])
+            else:
+                logger.warning(f"Unexpected API response for {year}: {data.get('message', 'Unknown error')}")
+                items = []
+            
             results = []
-            for item in data:
-                open_code = [int(x) for x in item['openCode'].split(',')]
-                tema = open_code[6]
-                tema_zodiac = item['zodiac'][6]
+            for item in items:
+                open_code = [int(x.strip()) for x in item['openCode'].split(',')]
+                zodiacs = [x.strip() for x in item['zodiac'].split(',')]
+                
+                tema = open_code[6]  # 7th number (index 6)
+                tema_zodiac = zodiacs[6]  # 7th zodiac
                 
                 results.append({
                     'expect': item['expect'],
@@ -371,6 +405,71 @@ class APIHandler:
         except Exception as e:
             logger.error(f"Error fetching history for {year}: {e}")
             return []
+
+
+def get_zodiac_from_number(number: int) -> Optional[str]:
+    """Get zodiac from number using lookup table"""
+    for zodiac, numbers in ZODIAC_NUMBERS.items():
+        if number in numbers:
+            return zodiac
+    return None
+
+
+def extract_tema_info(open_code: str, zodiac_str: str) -> Dict:
+    """Extract tema information with dual verification"""
+    codes = [int(x.strip()) for x in open_code.split(',')]
+    zodiacs = [x.strip() for x in zodiac_str.split(',')]
+    
+    tema_number = codes[6]  # 7th number (index 6)
+    tema_zodiac_api = zodiacs[6]  # API returned zodiac
+    
+    # Verify through number lookup table
+    tema_zodiac_calculated = get_zodiac_from_number(tema_number)
+    
+    # Verify consistency
+    if tema_zodiac_api != tema_zodiac_calculated:
+        logger.warning(
+            f"⚠️ Zodiac mismatch! Codes:{codes}, Number:{tema_number}, "
+            f"API:{tema_zodiac_api}, Calculated:{tema_zodiac_calculated}"
+        )
+    
+    return {
+        'number': tema_number,
+        'zodiac': tema_zodiac_api,  # Prioritize API returned
+        'emoji': ZODIAC_EMOJI.get(tema_zodiac_api, '❓')
+    }
+
+
+def sync_history_data(db_handler: DatabaseHandler) -> int:
+    """Sync historical data on first startup"""
+    logger.info("🔄 Starting history data sync...")
+    
+    total_synced = 0
+    for year in [2024, 2025, 2026]:
+        try:
+            logger.info(f"Fetching {year} data...")
+            results = APIHandler.get_history(year)
+            
+            for result in results:
+                try:
+                    db_handler.save_lottery_result(
+                        expect=result['expect'],
+                        open_code=result['open_code'],
+                        tema=result['tema'],
+                        tema_zodiac=result['tema_zodiac'],
+                        open_time=result['open_time']
+                    )
+                    total_synced += 1
+                except Exception as e:
+                    logger.error(f"Failed to save {result.get('expect', 'unknown')}: {e}")
+            
+            logger.info(f"✅ {year} data synced successfully: {len(results)} records")
+            
+        except Exception as e:
+            logger.error(f"❌ {year} data sync failed: {e}")
+    
+    logger.info(f"🎉 History data sync completed! Total synced: {total_synced} records")
+    return total_synced
 
 
 class PredictionEngine:
@@ -1284,6 +1383,13 @@ class LotteryBot:
         if not TELEGRAM_BOT_TOKEN:
             logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
             sys.exit(1)
+        
+        # Check if database is empty and sync history data
+        if self.db.is_database_empty():
+            logger.info("Database is empty, starting history sync...")
+            sync_history_data(self.db)
+        else:
+            logger.info("Database already has data, skipping history sync")
         
         # Create application
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
