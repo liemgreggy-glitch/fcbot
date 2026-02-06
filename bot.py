@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Macau Lottery Telegram Bot (澳门六合彩预测机器人)
+Telegram Bot (预测机器人)
 Complete bot with prediction, analysis, and automation features
 """
 
@@ -72,9 +72,15 @@ ZODIAC_NUMBERS = {
 
 # Zodiac emoji mapping
 ZODIAC_EMOJI = {
+    # 简体
     '鼠': '🐭', '牛': '🐮', '虎': '🐯', '兔': '🐰',
     '龙': '🐉', '蛇': '🐍', '马': '🐴', '羊': '🐑',
-    '猴': '🐵', '鸡': '🐔', '狗': '🐶', '猪': '🐖'
+    '猴': '🐵', '鸡': '🐔', '狗': '🐶', '猪': '🐖',
+    
+    # 繁体（兼容 API 返回的繁体字）
+    '鼠': '🐭', '牛': '🐮', '虎': '🐯', '兔': '🐰',
+    '龍': '🐉', '蛇': '🐍', '馬': '🐴', '羊': '🐑',
+    '猴': '🐵', '雞': '🐔', '狗': '🐶', '豬': '🐖'
 }
 
 # Reverse mapping: number to zodiac
@@ -174,8 +180,12 @@ class DatabaseHandler:
     
     def save_lottery_result(self, expect: str, open_code: List[int], tema: int, tema_zodiac: str, open_time: str):
         """Save lottery result to database"""
+        # 繁体转简体
+        tema_zodiac = tema_zodiac.replace("龍", "龙").replace("馬", "马").replace("豬", "猪").replace("雞", "鸡")
+        
         conn = self.get_connection()
         cursor = conn.cursor()
+        ...
         
         try:
             cursor.execute('''
@@ -707,22 +717,78 @@ class PredictionEngine:
         return top5, scores
     
     def _predict_by_zodiac(self, history: List[Dict]) -> Tuple[List[int], Dict]:
-        """Predict based on zodiac cycle"""
-        zodiac_list = [h['tema_zodiac'] for h in history[:20]]
-        zodiac_counter = Counter(zodiac_list)
+        """Predict based on comprehensive zodiac analysis"""
         
-        # Find least appeared zodiacs
+        # 1️⃣ 长期频率分析（100期）
+        zodiac_list_100 = [h['tema_zodiac'] for h in history[:100]]
+        long_term_counter = Counter(zodiac_list_100)
+        
+        # 2️⃣ 中期频率分析（50期）
+        zodiac_list_50 = [h['tema_zodiac'] for h in history[:50]]
+        mid_term_counter = Counter(zodiac_list_50)
+        
+        # 3️⃣ 短期频率分析（20期）
+        zodiac_list_20 = [h['tema_zodiac'] for h in history[:20]]
+        short_term_counter = Counter(zodiac_list_20)
+        
         all_zodiacs = list(ZODIAC_NUMBERS.keys())
-        zodiac_scores = {z: zodiac_counter.get(z, 0) for z in all_zodiacs}
-        sorted_zodiacs = sorted(zodiac_scores.items(), key=lambda x: x[1])
+        zodiac_analysis = {}
         
-        # Pick numbers from top zodiacs
+        for zodiac in all_zodiacs:
+            # 计算各周期出现频率
+            freq_100 = long_term_counter.get(zodiac, 0)
+            freq_50 = mid_term_counter.get(zodiac, 0)
+            freq_20 = short_term_counter.get(zodiac, 0)
+            
+            # 计算遗漏期数（多久没出现）
+            missing_periods = 0
+            for h in history:
+                if h['tema_zodiac'] == zodiac:
+                    break
+                missing_periods += 1
+            
+            # 综合评分算法
+            # 长期低频 = 应该出现（权重 30%）
+            long_term_score = (8.3 - freq_100 / 100 * 12) * 30  # 理论平均 8.3 次
+            
+            # 中期低频 = 近期冷门（权重 25%）
+            mid_term_score = (4.2 - freq_50 / 50 * 12) * 25
+            
+            # 短期低频 = 当前冷门（权重 20%）
+            short_term_score = (1.7 - freq_20 / 20 * 12) * 20
+            
+            # 遗漏期数 = 该轮到了（权重 25%）
+            missing_score = min(missing_periods / 2, 25)  # 最多25分
+            
+            # 总分
+            total_score = (long_term_score + mid_term_score + 
+                          short_term_score + missing_score)
+            
+            zodiac_analysis[zodiac] = {
+                'score': total_score,
+                'freq_100': freq_100,
+                'freq_50': freq_50,
+                'freq_20': freq_20,
+                'missing': missing_periods
+            }
+        
+        # 按评分排序
+        sorted_zodiacs = sorted(zodiac_analysis.items(), 
+                              key=lambda x: x[1]['score'], 
+                              reverse=True)
+        
+        # 选择 TOP 5
         top5 = []
         scores = {}
-        for zodiac, count in sorted_zodiacs[:5]:
+        
+        for i, (zodiac, analysis) in enumerate(sorted_zodiacs[:5]):
+            # 从该生肖的号码中选择
             num = random.choice(ZODIAC_NUMBERS[zodiac])
             top5.append(num)
-            scores[num] = 80.0 - count * 2
+            
+            # 计算显示评分（60-95分）
+            display_score = 95 - i * 7  # TOP1=95, TOP2=88, TOP3=81...
+            scores[num] = display_score
         
         return top5, scores
     
@@ -760,48 +826,85 @@ class PredictionEngine:
         return top5, scores
     
     def _predict_comprehensive(self, history: List[Dict]) -> Tuple[List[int], Dict]:
-        """Comprehensive prediction with weighted factors
+        """Comprehensive prediction based on data analysis
         
-        Note: Predicts only numbers 1-49. Number 50 exists in zodiac mapping for 狗
-        but is extremely rare in actual lottery draws, so excluded from predictions.
+        综合预测算法（纯数据驱动）：
+        1. 长期频率分析（100期）- 30% 权重
+        2. 短期遗漏分析（20期）- 35% 权重  
+        3. 生肖周期分析（30期）- 25% 权重
+        4. 连号避免机制 - 10% 权重
+        
+        Note: Predicts only numbers 1-49.
         """
         all_scores = defaultdict(float)
         
-        # Factor 1: Frequency analysis (35% weight)
-        tema_list = [h['tema'] for h in history]
-        counter = Counter(tema_list)
-        total_count = len(tema_list)
-        for num in range(1, 50):  # 1-49 only
-            freq = counter.get(num, 0)
-            all_scores[num] += (freq / total_count) * 35
+        # 因子1：长期频率分析（30%权重）- 冷号回补理论
+        tema_list_100 = [h['tema'] for h in history[:100]]
+        counter_100 = Counter(tema_list_100)
+        expected_freq = 100 / 49  # 理论平均 2.04 次
         
-        # Factor 2: Missing value analysis (30% weight)
-        recent = [h['tema'] for h in history[:20]]
-        for num in range(1, 50):  # 1-49 only
-            if num not in recent:
-                all_scores[num] += 30
+        for num in range(1, 50):
+            freq = counter_100.get(num, 0)
+            # 出现越少，分数越高（冷号回补）
+            if freq == 0:
+                all_scores[num] += 30  # 从未出现，满分
             else:
-                # Penalty for recently appeared
-                last_idx = recent.index(num)
-                all_scores[num] += (last_idx / 20) * 30
+                deviation = expected_freq - freq
+                score = (deviation / expected_freq) * 30
+                all_scores[num] += max(0, score)  # 低于平均才加分
         
-        # Factor 3: Zodiac cycle (25% weight)
-        zodiac_list = [h['tema_zodiac'] for h in history[:15]]
-        zodiac_counter = Counter(zodiac_list)
-        for num in range(1, 50):  # 1-49 only
+        # 因子2：短期遗漏分析（35%权重）
+        recent_20 = [h['tema'] for h in history[:20]]
+        for num in range(1, 50):
+            if num not in recent_20:
+                all_scores[num] += 35  # 最近20期没出现，满分
+            else:
+                # 根据距离现在的位置计算分数
+                last_idx = recent_20.index(num)  # 0=最新期, 19=第20期
+                # 越早出现，分数越高
+                all_scores[num] += (last_idx / 20) * 35
+        
+        # 因子3：生肖周期分析（25%权重）
+        zodiac_list_30 = [h['tema_zodiac'] for h in history[:30]]
+        zodiac_counter = Counter(zodiac_list_30)
+        expected_zodiac_freq = 30 / 12  # 理论平均 2.5 次
+        
+        for num in range(1, 50):
             zodiac = NUMBER_TO_ZODIAC.get(num)
             if zodiac:
                 zodiac_freq = zodiac_counter.get(zodiac, 0)
-                all_scores[num] += (1 - zodiac_freq / 15) * 25
+                # 该生肖出现越少，分数越高
+                if zodiac_freq == 0:
+                    all_scores[num] += 25
+                else:
+                    deviation = expected_zodiac_freq - zodiac_freq
+                    score = (deviation / expected_zodiac_freq) * 25
+                    all_scores[num] += max(0, score)
         
-        # Factor 4: Random factor (10% weight)
-        for num in range(1, 50):  # 1-49 only
-            all_scores[num] += random.uniform(0, 10)
+        # 因子4：连号避免机制（10%权重）
+        # 避免预测刚出现过的号码
+        recent_5 = [h['tema'] for h in history[:5]]
+        for num in range(1, 50):
+            if num in recent_5[:2]:
+                # 最近2期出现过，扣分
+                all_scores[num] -= 10
+            elif num in recent_5[2:5]:
+                # 3-5期出现过，扣少一点
+                all_scores[num] -= 5
+            else:
+                # 最近5期没出现，加分
+                all_scores[num] += 10
         
-        # Get top 5
+        # 排序取 TOP 5
         sorted_nums = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
         top5 = [num for num, _ in sorted_nums[:5]]
-        scores = {num: score for num, score in sorted_nums[:5]}
+        
+        # 计算显示评分（归一化到 60-95 分）
+        scores = {}
+        for i, num in enumerate(top5):
+            # 递减评分：95, 88, 81, 74, 67
+            display_score = 95 - i * 7
+            scores[num] = display_score
         
         return top5, scores
     
@@ -1079,21 +1182,55 @@ class LotteryBot:
         
         countdown = self.get_countdown()
         
+        # 获取最新开奖结果
+        latest = self.db.get_latest_result()
+        
         message = f"""
-🎰 <b>澳门六合彩预测机器人</b> 🎰
+🎰 <b>预测机器人</b> 🎰
 
 👋 欢迎，{user.first_name}！
 
-📅 今日开奖倒计时：<code>{countdown}</code>
-⏰ 开奖时间：每晚 {LOTTERY_TIME}
+📅 <b>今日开奖倒计时：<code>{countdown}</code></b>
+⏰ <b>开奖时间：每晚 {LOTTERY_TIME}</b>
+"""
+        
+        # 添加最新开奖结果
+        if latest:
+            tema = latest['tema']
+            open_code = latest['open_code']
+            expect = latest['expect']
+            open_time = latest.get('open_time', '')
+            zodiac = latest.get('tema_zodiac', NUMBER_TO_ZODIAC.get(tema, '未知'))
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
+            
+            # 格式化开奖时间
+            if open_time:
+                from datetime import datetime
+                try:
+                    dt = datetime.strptime(open_time, '%Y-%m-%d %H:%M:%S')
+                    time_str = dt.strftime('%m月%d日 %H:%M')
+                except:
+                    time_str = open_time
+            else:
+                time_str = '未知'
+            
+            # 格式化七色球（去掉方括号）
+            if isinstance(open_code, list):
+                balls_str = ', '.join([f"{num:02d}" for num in open_code])
+            else:
+                balls_str = str(open_code).strip('[]')
+            
+            message += f"""
+➖➖➖➖➖➖➖
+📊 <b>最新开奖（{expect}期）</b>
 
-✨ <b>功能导航</b> ✨
-• 🎯 智能预测 - AI预测特码TOP5
-• 📊 最新开奖 - 查看最新结果
-• 📈 数据分析 - 频率/生肖/冷热分析
-• 📜 历史记录 - 查询历史开奖
-• ⚙️ 个人设置 - 通知提醒设置
-
+🎯 <b>特码：{tema:02d}    {zodiac_emoji}{zodiac}</b>
+🎲 <b>七色球：{balls_str}</b>
+📅 <b>时间：{time_str}</b>
+➖➖➖➖➖➖➖
+"""
+        
+        message += """
 ⚠️ <b>免责声明</b>
 本机器人仅供娱乐和学习参考，预测结果不构成任何投资建议。请理性娱乐，谨慎决策。
 
@@ -1197,11 +1334,10 @@ class LotteryBot:
         message = f"""
 🎯 <b>智能预测菜单</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📅 下期期号：{next_expect}
 ⏰ 开奖倒计时：{countdown}
-
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🔮 <b>AI 生肖预测（TOP 2）</b> ⭐ 推荐
 
 基于多维度分析预测最可能的2个生肖
@@ -1211,22 +1347,19 @@ class LotteryBot:
 • 趋势分析 (20%)
 
 📊 预测状态：{prediction_status}
-
-━━━━━━━━━━━━━━━━━━━━━
-<b>其他预测方式</b>
-
-• <b>AI综合预测</b> - 多因素综合分析（TOP 5）
-• <b>生肖预测</b> - 基于生肖周期
-• <b>热号预测</b> - 近期高频号码
-• <b>冷号预测</b> - 长期未出号码
+➖➖➖➖➖➖➖
+⚠️ 免责声明
+本机器人仅供娱乐和学习参考，预测结果不构成任何投资建议。请理性娱乐，谨慎决策。
 
 ⚠️ 预测仅供参考，不保证准确性
 """
         
         keyboard = [
             [InlineKeyboardButton("🔮 AI 生肖预测（TOP 2）⭐", callback_data="ai_zodiac_predict")],
-            [InlineKeyboardButton("🤖 AI综合预测", callback_data="predict_comprehensive")],
-            [InlineKeyboardButton("🐲 生肖预测", callback_data="predict_zodiac")],
+            [
+                InlineKeyboardButton("🤖 综合预测", callback_data="predict_comprehensive"),
+                InlineKeyboardButton("🐲 生肖预测", callback_data="predict_zodiac"),
+            ],
             [
                 InlineKeyboardButton("🔥 热号预测", callback_data="predict_hot"),
                 InlineKeyboardButton("❄️ 冷号预测", callback_data="predict_cold"),
@@ -1242,6 +1375,14 @@ class LotteryBot:
         """Show prediction result"""
         top5, scores = self.predictor.predict_top5(method)
         
+        # 获取当前期号和下一期（必须在使用前定义！）
+        latest = self.db.get_latest_result()
+        current_expect = latest['expect'] if latest else '未知'
+        if latest and latest['expect'].isdigit():
+            next_expect = str(int(latest['expect']) + 1)
+        else:
+            next_expect = '未知'
+        
         method_names = {
             'comprehensive': 'AI综合预测',
             'zodiac': '生肖预测',
@@ -1250,7 +1391,11 @@ class LotteryBot:
             'frequency': '频率预测'
         }
         
+        # 添加期号显示
         message = f"🎯 <b>{method_names.get(method, '预测')}</b>\n\n"
+        message += f"📅 当前期号：{current_expect}\n"
+        message += f"🎲 预测期号：<b>{next_expect}</b>\n\n"
+        message += "➖➖➖➖➖➖➖\n"
         message += "📊 <b>TOP5 特码预测：</b>\n\n"
         
         for idx, num in enumerate(top5, 1):
@@ -1262,13 +1407,12 @@ class LotteryBot:
             message += f"   {bar}\n\n"
         
         countdown = self.get_countdown()
-        message += f"\n⏰ 距离开奖：<code>{countdown}</code>\n"
+        message += "➖➖➖➖➖➖➖\n"
+        message += f"⏰ 距离开奖：<code>{countdown}</code>\n"
         message += "\n⚠️ <i>预测仅供参考，请理性对待</i>"
         
         # Save prediction
-        latest = self.db.get_latest_result()
         if latest:
-            next_expect = str(int(latest['expect']) + 1)
             self.db.save_prediction(next_expect, top5)
         
         keyboard = [
@@ -1304,11 +1448,11 @@ class LotteryBot:
         message = f"""
 🔮 <b>AI 生肖预测（TOP 2）</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📅 预测期号：{next_expect}
 ⏰ 开奖倒计时：{countdown}
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📊 预测状态：<b>未预测</b>
 
 💡 <b>提示：</b>
@@ -1317,7 +1461,7 @@ class LotteryBot:
 • 开奖后自动对比结果
 • 结果将记录到历史
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🤖 <b>AI 分析维度：</b>
 
 ✅ 生肖频率分析（30%权重）
@@ -1327,7 +1471,7 @@ class LotteryBot:
 
 分析期数：最近100期历史数据
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 """
         
         keyboard = [
@@ -1432,12 +1576,12 @@ class LotteryBot:
         message = f"""
 🔮 <b>AI 生肖预测（{expect}期）</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 ⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
 📊 开奖倒计时：{countdown}
 📈 分析期数：100期
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🥇 <b>推荐生肖一：{emoji1} {zodiac1}</b>
 
 📊 综合评分：{score1:.1f}/100 {stars1}
@@ -1451,7 +1595,7 @@ class LotteryBot:
 
 🎯 <b>对应号码：</b>{numbers1_str}
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🥈 <b>推荐生肖二：{emoji2} {zodiac2}</b>
 
 📊 综合评分：{score2:.1f}/100 {stars2}
@@ -1465,7 +1609,7 @@ class LotteryBot:
 
 🎯 <b>对应号码：</b>{numbers2_str}
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 """
         
         if hit_stats['total'] > 0:
@@ -1484,7 +1628,7 @@ class LotteryBot:
             message += "\n"
         
         message += """
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 ⚠️ <b>重要提示</b>
 
 ✅ 本期预测已锁定，无法修改
@@ -1523,18 +1667,18 @@ class LotteryBot:
         message = f"""
 🔮 <b>AI 生肖预测（{expect}期）</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 ⏰ 开奖倒计时：{countdown}
 
 📊 本期预测状态：<b>✅ 已预测（已锁定）</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🎯 <b>本期预测结果</b>
 
 🥇 推荐生肖一：{emoji1} {zodiac1} ({record['predict_numbers1']})
 🥈 推荐生肖二：{emoji2} {zodiac2} ({record['predict_numbers2']})
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📅 预测时间：{record['predict_time']}
 ⏰ 开奖时间：预计 {LOTTERY_TIME}
 
@@ -1548,7 +1692,7 @@ class LotteryBot:
             
             message += f"""
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🎰 <b>开奖结果对比</b>
 
 实际开出：<b>{record['actual_tema']:02d}</b> {actual_emoji}{actual_zodiac}
@@ -1570,7 +1714,7 @@ class LotteryBot:
         
         message += """
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 """
         
         keyboard = [
@@ -1590,7 +1734,7 @@ class LotteryBot:
             message = """
 📊 <b>预测历史记录</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 暂无预测历史记录
 
 请先进行预测后查看
@@ -1599,7 +1743,7 @@ class LotteryBot:
             message = f"""
 📊 <b>预测历史记录</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📈 <b>总体统计</b>
 
 总预测次数：{hit_stats['total']}期
@@ -1615,7 +1759,7 @@ class LotteryBot:
             
             message += """
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📅 <b>最近预测记录</b>
 
 """
@@ -1637,7 +1781,7 @@ class LotteryBot:
                 
                 message += f"{record['expect']}  预测:{emoji1}{z1}{emoji2}{z2}  {result_str}\n"
             
-            message += "\n━━━━━━━━━━━━━━━━━━━━━"
+            message += "\n➖➖➖➖➖➖➖"
         
         keyboard = [
             [InlineKeyboardButton("🔮 开始预测", callback_data="ai_zodiac_predict")],
@@ -1811,7 +1955,7 @@ class LotteryBot:
         message = f"""
 📈 <b>走势分析（最近30期）</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🔍 <b>最近10期特码走势</b>
 
 """
@@ -1823,13 +1967,13 @@ class LotteryBot:
         
         message += f"""
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📊 <b>走势特征分析</b>
 
 🔗 连号出现：{consecutive_pairs}次
 📍 连号概率：{consecutive_pairs/9*100:.1f}%
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🐉 <b>生肖热度排行（30期）</b>
 
 """
@@ -1841,7 +1985,7 @@ class LotteryBot:
         
         message += """
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 💡 <b>趋势提示</b>
 
 """
@@ -1907,14 +2051,14 @@ class LotteryBot:
         message = f"""
 📋 <b>综合数据报告</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📊 <b>基础统计</b>
 
 • 统计期数：{total_periods}期
 • 数据范围：{oldest['expect']} - {latest['expect']}
 • 统计时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M')}
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🔢 <b>号码分布</b>
 
 • 最热号码：<b>{most_common_tema[0]:02d}</b> ({most_common_tema[1]}次)
@@ -1922,14 +2066,14 @@ class LotteryBot:
 • 平均出现：{total_periods/49:.2f}次/号
 • 号码覆盖：{unique_numbers}/49 ({unique_numbers/49*100:.1f}%)
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🐉 <b>生肖分布</b>
 
 • 最热生肖：{ZODIAC_EMOJI.get(most_common_zodiac[0], '')}{most_common_zodiac[0]} ({most_common_zodiac[1]}次, {most_common_zodiac[1]/total_periods*100:.1f}%)
 • 最冷生肖：{ZODIAC_EMOJI.get(least_common_zodiac[0], '')}{least_common_zodiac[0]} ({least_common_zodiac[1]}次, {least_common_zodiac[1]/total_periods*100:.1f}%)
 • 理论期望：{total_periods/12:.2f}次/生肖
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📈 <b>遗漏分析</b>
 
 • 从未出现：{len(not_appeared)}个号码
@@ -1942,7 +2086,7 @@ class LotteryBot:
         
         message += f"""
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📊 <b>区间分布</b>
 
 01-10：{intervals['01-10']}次 ({intervals['01-10']/total_periods*100:.1f}%)
@@ -1951,7 +2095,7 @@ class LotteryBot:
 31-40：{intervals['31-40']}次 ({intervals['31-40']/total_periods*100:.1f}%)
 41-49：{intervals['41-49']}次 ({intervals['41-49']/total_periods*100:.1f}%)
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 💡 <b>综合分析结论</b>
 
 """
@@ -2175,19 +2319,15 @@ class LotteryBot:
         countdown = self.get_countdown()
         
         message = f"""
-🎰 <b>澳门六合彩预测机器人</b> 🎰
+🎰 <b>预测机器人</b> 🎰
 
 👋 欢迎，{user.first_name}！
 
 📅 今日开奖倒计时：<code>{countdown}</code>
 ⏰ 开奖时间：每晚 {LOTTERY_TIME}
 
-✨ <b>功能导航</b> ✨
-• 🎯 智能预测 - AI预测特码TOP5
-• 📊 最新开奖 - 查看最新结果
-• 📈 数据分析 - 频率/生肖/冷热分析
-• 📜 历史记录 - 查询历史开奖
-• ⚙️ 个人设置 - 通知提醒设置
+⚠️ <b>免责声明</b>
+本机器人仅供娱乐和学习参考，预测结果不构成任何投资建议。请理性娱乐，谨慎决策。
 
 请选择功能：
 """
@@ -2267,15 +2407,15 @@ class LotteryBot:
         message = f"""
 🎰 <b>【新开奖结果】</b>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📅 期号：{result['expect']}
 ⏰ 时间：{result['open_time']}
 
 🎲 正码：<code>{codes}</code>
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 🌟 <b>特码：{result['tema']:02d}</b>  {zodiac_emoji}{result['tema_zodiac']}
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 """
         
         # Add prediction comparison if exists and result has been recorded
@@ -2305,7 +2445,7 @@ class LotteryBot:
                 hit_stats = self.db.calculate_hit_rate()
                 message += f"""
 
-━━━━━━━━━━━━━━━━━━━━━
+➖➖➖➖➖➖➖
 📊 <b>命中率统计</b>
 
 总命中率：{hit_stats['hit_rate']:.1f}%
@@ -2316,7 +2456,7 @@ class LotteryBot:
                 # is_hit == 2 means it's a miss
                 message += f"💔 <b>很遗憾，本期预测未中</b>\n"
             
-            message += "\n━━━━━━━━━━━━━━━━━━━━━\n"
+            message += "\n➖➖➖➖➖➖➖\n"
         
         message += "\n恭喜中奖的朋友！ 🎊"
         
@@ -2437,7 +2577,7 @@ class LotteryBot:
         
         # Run bot
         try:
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=True)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
         finally:
