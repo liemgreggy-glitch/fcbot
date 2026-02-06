@@ -119,10 +119,10 @@ class DatabaseHandler:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                notify_enabled INTEGER DEFAULT 1,
-                reminder_enabled INTEGER DEFAULT 0,
-                auto_predict_reminder INTEGER DEFAULT 1,
-                auto_predict INTEGER DEFAULT 0,
+                notify_enabled INTEGER DEFAULT 1,           -- 开奖通知开关
+                reminder_enabled INTEGER DEFAULT 0,         -- 21:00开奖提醒
+                auto_predict_reminder INTEGER DEFAULT 1,    -- 新期号发布时提醒预测
+                auto_predict INTEGER DEFAULT 0,             -- 开奖后自动预测（暂未实现）
                 default_period INTEGER DEFAULT 50,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -398,6 +398,7 @@ class DatabaseHandler:
             predict1, predict2 = record['predict_zodiac1'], record['predict_zodiac2']
             
             # Determine hit status
+            # is_hit: 0 = not yet drawn, 1 = hit, 2 = miss
             if actual_zodiac == predict1:
                 is_hit, hit_rank = 1, 1
             elif actual_zodiac == predict2:
@@ -417,12 +418,12 @@ class DatabaseHandler:
         conn.close()
     
     def get_prediction_history(self, limit: int = 10) -> List[Dict]:
-        """Get prediction history"""
+        """Get prediction history (only predictions with actual results)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM prediction_records 
-            WHERE is_hit > 0
+            WHERE actual_tema IS NOT NULL
             ORDER BY expect DESC 
             LIMIT ?
         ''', (limit,))
@@ -446,34 +447,34 @@ class DatabaseHandler:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Total predictions (with results)
-        cursor.execute('SELECT COUNT(*) as total FROM prediction_records WHERE is_hit > 0')
+        # Total predictions with actual results (both hits and misses)
+        cursor.execute('SELECT COUNT(*) as total FROM prediction_records WHERE actual_tema IS NOT NULL')
         total = cursor.fetchone()['total']
         
-        # Hit count
+        # Hit count (is_hit = 1 means hit)
         cursor.execute('SELECT COUNT(*) as hits FROM prediction_records WHERE is_hit = 1')
         hits = cursor.fetchone()['hits']
         
         # Recent 10 periods
         cursor.execute('''
             SELECT COUNT(*) as recent_hits 
-            FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 10)
+            FROM (SELECT * FROM prediction_records WHERE actual_tema IS NOT NULL ORDER BY expect DESC LIMIT 10)
             WHERE is_hit = 1
         ''')
         recent_10_hits = cursor.fetchone()['recent_hits']
         
-        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 10)')
+        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE actual_tema IS NOT NULL ORDER BY expect DESC LIMIT 10)')
         recent_10_total = cursor.fetchone()['recent_total']
         
         # Recent 5 periods
         cursor.execute('''
             SELECT COUNT(*) as recent_hits 
-            FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 5)
+            FROM (SELECT * FROM prediction_records WHERE actual_tema IS NOT NULL ORDER BY expect DESC LIMIT 5)
             WHERE is_hit = 1
         ''')
         recent_5_hits = cursor.fetchone()['recent_hits']
         
-        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE is_hit > 0 ORDER BY expect DESC LIMIT 5)')
+        cursor.execute('SELECT COUNT(*) as recent_total FROM (SELECT * FROM prediction_records WHERE actual_tema IS NOT NULL ORDER BY expect DESC LIMIT 5)')
         recent_5_total = cursor.fetchone()['recent_total']
         
         conn.close()
@@ -944,14 +945,25 @@ class PredictionEngine:
         except ValueError:
             current_missing = len(zodiac_list)
         
-        # Find all missing periods
-        missing_periods = []
+        # Find all appearances and calculate missing periods between them
+        appearances = []
         for i, z in enumerate(zodiac_list):
             if z == zodiac:
-                missing_periods.append(i)
+                appearances.append(i)
         
-        max_missing = max(missing_periods) if missing_periods else len(zodiac_list)
-        avg_missing = sum(missing_periods) / len(missing_periods) if missing_periods else len(zodiac_list)
+        # Calculate missing periods between appearances
+        if appearances:
+            gaps = []
+            for i in range(len(appearances) - 1):
+                gap = appearances[i+1] - appearances[i] - 1
+                gaps.append(gap)
+            
+            max_missing = max(gaps) if gaps else current_missing
+            avg_missing = sum(gaps) / len(gaps) if gaps else current_missing
+        else:
+            # Never appeared
+            max_missing = len(zodiac_list)
+            avg_missing = len(zodiac_list)
         
         return {
             'count': count,
@@ -1521,7 +1533,7 @@ class LotteryBot:
 
 ━━━━━━━━━━━━━━━━━━━━━
 📅 预测时间：{record['predict_time']}
-⏰ 开奖时间：预计 21:32:32
+⏰ 开奖时间：预计 {LOTTERY_TIME}
 
 💡 提示：开奖后将自动对比预测结果
 """
@@ -2263,8 +2275,8 @@ class LotteryBot:
 ━━━━━━━━━━━━━━━━━━━━━
 """
         
-        # Add prediction comparison if exists
-        if prediction and prediction['is_hit'] > 0:
+        # Add prediction comparison if exists and has actual result
+        if prediction and prediction.get('actual_tema') is not None:
             pred_z1 = prediction['predict_zodiac1']
             pred_z2 = prediction['predict_zodiac2']
             emoji1 = ZODIAC_EMOJI.get(pred_z1, '')
@@ -2297,6 +2309,7 @@ class LotteryBot:
                 if hit_stats['recent_10_total'] > 0:
                     message += f"近10期：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%\n"
             else:
+                # is_hit == 2, meaning it's a miss
                 message += f"💔 <b>很遗憾，本期预测未中</b>\n"
             
             message += "\n━━━━━━━━━━━━━━━━━━━━━\n"
