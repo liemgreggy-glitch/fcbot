@@ -222,6 +222,11 @@ class DatabaseHandler:
     
     def update_user_setting(self, user_id: int, setting: str, value: int):
         """Update user setting"""
+        # Validate setting name to prevent SQL injection
+        allowed_settings = ['notify_enabled', 'reminder_enabled', 'auto_predict', 'default_period']
+        if setting not in allowed_settings:
+            raise ValueError(f"Invalid setting: {setting}")
+        
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute(f'''
@@ -366,7 +371,7 @@ class PredictionEngine:
         history = self.db.get_history(100)
         
         if not history:
-            # Random prediction if no history
+            # Random prediction if no history (1-49, excluding 50)
             top5 = random.sample(range(1, 50), 5)
             scores = {num: 50.0 for num in top5}
             return top5, scores
@@ -431,7 +436,7 @@ class PredictionEngine:
         tema_list = [h['tema'] for h in history[:50]]
         counter = Counter(tema_list)
         
-        # Find numbers that haven't appeared
+        # Find numbers that haven't appeared (1-49 only, 50 is rare special case)
         all_numbers = set(range(1, 50))
         appeared = set(tema_list)
         not_appeared = all_numbers - appeared
@@ -448,20 +453,24 @@ class PredictionEngine:
         return top5, scores
     
     def _predict_comprehensive(self, history: List[Dict]) -> Tuple[List[int], Dict]:
-        """Comprehensive prediction with weighted factors"""
+        """Comprehensive prediction with weighted factors
+        
+        Note: Predicts only numbers 1-49. Number 50 exists in zodiac mapping for 狗
+        but is extremely rare in actual lottery draws, so excluded from predictions.
+        """
         all_scores = defaultdict(float)
         
         # Factor 1: Frequency analysis (35% weight)
         tema_list = [h['tema'] for h in history]
         counter = Counter(tema_list)
         total_count = len(tema_list)
-        for num in range(1, 50):
+        for num in range(1, 50):  # 1-49 only
             freq = counter.get(num, 0)
             all_scores[num] += (freq / total_count) * 35
         
         # Factor 2: Missing value analysis (30% weight)
         recent = [h['tema'] for h in history[:20]]
-        for num in range(1, 50):
+        for num in range(1, 50):  # 1-49 only
             if num not in recent:
                 all_scores[num] += 30
             else:
@@ -472,14 +481,14 @@ class PredictionEngine:
         # Factor 3: Zodiac cycle (25% weight)
         zodiac_list = [h['tema_zodiac'] for h in history[:15]]
         zodiac_counter = Counter(zodiac_list)
-        for num in range(1, 50):
+        for num in range(1, 50):  # 1-49 only
             zodiac = NUMBER_TO_ZODIAC.get(num)
             if zodiac:
                 zodiac_freq = zodiac_counter.get(zodiac, 0)
                 all_scores[num] += (1 - zodiac_freq / 15) * 25
         
         # Factor 4: Random factor (10% weight)
-        for num in range(1, 50):
+        for num in range(1, 50):  # 1-49 only
             all_scores[num] += random.uniform(0, 10)
         
         # Get top 5
@@ -490,7 +499,7 @@ class PredictionEngine:
         return top5, scores
     
     def get_hot_cold_analysis(self, period: int = 30) -> Dict:
-        """Get hot and cold numbers analysis"""
+        """Get hot and cold numbers analysis (1-49 range)"""
         history = self.db.get_history(period)
         tema_list = [h['tema'] for h in history]
         counter = Counter(tema_list)
@@ -498,7 +507,7 @@ class PredictionEngine:
         # Hot numbers (top 10)
         hot = counter.most_common(10)
         
-        # Cold numbers (bottom 10)
+        # Cold numbers (bottom 10, excluding 50 as it's extremely rare)
         all_numbers = set(range(1, 50))
         appeared = set(tema_list)
         not_appeared = list(all_numbers - appeared)
@@ -529,7 +538,7 @@ class PredictionEngine:
         return distribution
     
     def get_missing_analysis(self) -> Dict:
-        """Analyze missing numbers"""
+        """Analyze missing numbers (1-49 range)"""
         history = self.db.get_history(50)
         tema_list = [h['tema'] for h in history]
         
@@ -539,7 +548,7 @@ class PredictionEngine:
             if tema not in last_appearance:
                 last_appearance[tema] = idx
         
-        # Find missing numbers
+        # Find missing numbers (1-49 only)
         all_numbers = set(range(1, 50))
         missing = []
         for num in all_numbers:
