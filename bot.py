@@ -1142,6 +1142,10 @@ class LotteryBot:
             await self.show_missing_analysis(query)
         elif data == "analysis_hotcold":
             await self.show_hotcold_analysis(query)
+        elif data == "analysis_trends":
+            await self.show_trends_analysis(query)
+        elif data == "analysis_comprehensive":
+            await self.show_comprehensive_report(query)
         
         # History handlers
         elif data.startswith("history_"):
@@ -1635,10 +1639,15 @@ class LotteryBot:
 
 多维度分析特码走势：
 
+<b>基础分析</b>
 • <b>频率分析</b> - 号码出现频次统计
 • <b>生肖分布</b> - 各生肖出现比例
 • <b>遗漏分析</b> - 长期未出号码
 • <b>冷热分析</b> - 冷热号码对比
+
+<b>高级分析</b>
+• <b>走势分析</b> - 号码走势图表
+• <b>综合报告</b> - 完整数据报告
 
 选择分析类型：
 """
@@ -1651,6 +1660,10 @@ class LotteryBot:
             [
                 InlineKeyboardButton("⏱ 遗漏分析", callback_data="analysis_missing"),
                 InlineKeyboardButton("🌡 冷热分析", callback_data="analysis_hotcold"),
+            ],
+            [
+                InlineKeyboardButton("📈 走势分析", callback_data="analysis_trends"),
+                InlineKeyboardButton("📋 综合报告", callback_data="analysis_comprehensive"),
             ],
             [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")],
         ]
@@ -1747,6 +1760,201 @@ class LotteryBot:
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
             zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_trends_analysis(self, query):
+        """Show trend analysis"""
+        history = self.db.get_history(30)
+        
+        if not history:
+            await query.edit_message_text("暂无历史数据")
+            return
+        
+        # Analyze trends
+        tema_list = [h['tema'] for h in history]
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        
+        # Get most recent trend (last 10 periods)
+        recent_temas = tema_list[:10]
+        recent_zodiacs = zodiac_list[:10]
+        
+        # Count consecutive appearances
+        consecutive_count = 0
+        if len(recent_temas) >= 2:
+            for i in range(len(recent_temas) - 1):
+                if abs(recent_temas[i] - recent_temas[i+1]) == 1:
+                    consecutive_count += 1
+        
+        # Zodiac distribution in recent 30
+        zodiac_counter = Counter(zodiac_list)
+        top_zodiacs = zodiac_counter.most_common(3)
+        
+        message = f"""
+📈 <b>走势分析（最近30期）</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+🔍 <b>最近10期特码走势</b>
+
+"""
+        
+        for i, tema in enumerate(recent_temas, 1):
+            zodiac = NUMBER_TO_ZODIAC.get(tema, '未知')
+            emoji = ZODIAC_EMOJI.get(zodiac, '')
+            message += f"{i}. <b>{tema:02d}</b> {emoji}{zodiac}\n"
+        
+        message += f"""
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>走势特征分析</b>
+
+🔗 连号出现：{consecutive_count}次
+📍 连号概率：{consecutive_count/9*100:.1f}%
+
+━━━━━━━━━━━━━━━━━━━━━
+🐉 <b>生肖热度排行（30期）</b>
+
+"""
+        
+        for idx, (zodiac, count) in enumerate(top_zodiacs, 1):
+            emoji = ZODIAC_EMOJI.get(zodiac, '')
+            percentage = count / len(zodiac_list) * 100
+            message += f"{idx}. {emoji}{zodiac}：{count}次 ({percentage:.1f}%)\n"
+        
+        message += """
+
+━━━━━━━━━━━━━━━━━━━━━
+💡 <b>趋势提示</b>
+
+"""
+        
+        if consecutive_count >= 3:
+            message += "• 连号趋势明显，可关注连号组合\n"
+        elif consecutive_count == 0:
+            message += "• 近期无连号，下期可能出现\n"
+        
+        if len(top_zodiacs) > 0:
+            hot_zodiac = top_zodiacs[0][0]
+            hot_emoji = ZODIAC_EMOJI.get(hot_zodiac, '')
+            message += f"• {hot_emoji}{hot_zodiac}生肖近期热度高\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_comprehensive_report(self, query):
+        """Show comprehensive data report"""
+        history = self.db.get_history(100)
+        
+        if not history:
+            await query.edit_message_text("暂无历史数据")
+            return
+        
+        # Collect statistics
+        tema_list = [h['tema'] for h in history]
+        zodiac_list = [h['tema_zodiac'] for h in history]
+        
+        # Basic stats
+        total_periods = len(history)
+        unique_numbers = len(set(tema_list))
+        
+        # Frequency analysis
+        tema_counter = Counter(tema_list)
+        most_common_tema = tema_counter.most_common(1)[0] if tema_counter else (0, 0)
+        least_common = tema_counter.most_common()[-1] if tema_counter else (0, 0)
+        
+        # Zodiac analysis
+        zodiac_counter = Counter(zodiac_list)
+        most_common_zodiac = zodiac_counter.most_common(1)[0] if zodiac_counter else ('未知', 0)
+        least_common_zodiac = zodiac_counter.most_common()[-1] if zodiac_counter else ('未知', 0)
+        
+        # Missing analysis
+        all_numbers = set(range(1, 50))
+        appeared = set(tema_list)
+        not_appeared = all_numbers - appeared
+        
+        # Interval distribution
+        intervals = {
+            '01-10': len([t for t in tema_list if 1 <= t <= 10]),
+            '11-20': len([t for t in tema_list if 11 <= t <= 20]),
+            '21-30': len([t for t in tema_list if 21 <= t <= 30]),
+            '31-40': len([t for t in tema_list if 31 <= t <= 40]),
+            '41-49': len([t for t in tema_list if 41 <= t <= 49]),
+        }
+        
+        latest = history[0]
+        oldest = history[-1]
+        
+        message = f"""
+📋 <b>综合数据报告</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>基础统计</b>
+
+• 统计期数：{total_periods}期
+• 数据范围：{oldest['expect']} - {latest['expect']}
+• 统计时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M')}
+
+━━━━━━━━━━━━━━━━━━━━━
+🔢 <b>号码分布</b>
+
+• 最热号码：<b>{most_common_tema[0]:02d}</b> ({most_common_tema[1]}次)
+• 最冷号码：<b>{least_common[0]:02d}</b> ({least_common[1]}次)
+• 平均出现：{total_periods/49:.2f}次/号
+• 号码覆盖：{unique_numbers}/49 ({unique_numbers/49*100:.1f}%)
+
+━━━━━━━━━━━━━━━━━━━━━
+🐉 <b>生肖分布</b>
+
+• 最热生肖：{ZODIAC_EMOJI.get(most_common_zodiac[0], '')}{most_common_zodiac[0]} ({most_common_zodiac[1]}次, {most_common_zodiac[1]/total_periods*100:.1f}%)
+• 最冷生肖：{ZODIAC_EMOJI.get(least_common_zodiac[0], '')}{least_common_zodiac[0]} ({least_common_zodiac[1]}次, {least_common_zodiac[1]/total_periods*100:.1f}%)
+• 理论期望：{total_periods/12:.2f}次/生肖
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 <b>遗漏分析</b>
+
+• 从未出现：{len(not_appeared)}个号码
+"""
+        
+        if not_appeared:
+            not_appeared_list = sorted(list(not_appeared))[:5]
+            not_appeared_str = ', '.join([f"{n:02d}" for n in not_appeared_list])
+            message += f"• 示例：{not_appeared_str}\n"
+        
+        message += f"""
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>区间分布</b>
+
+01-10：{intervals['01-10']}次 ({intervals['01-10']/total_periods*100:.1f}%)
+11-20：{intervals['11-20']}次 ({intervals['11-20']/total_periods*100:.1f}%)
+21-30：{intervals['21-30']}次 ({intervals['21-30']/total_periods*100:.1f}%)
+31-40：{intervals['31-40']}次 ({intervals['31-40']/total_periods*100:.1f}%)
+41-49：{intervals['41-49']}次 ({intervals['41-49']/total_periods*100:.1f}%)
+
+━━━━━━━━━━━━━━━━━━━━━
+💡 <b>综合分析结论</b>
+
+"""
+        
+        # Analysis conclusions
+        if most_common_tema[1] > total_periods/49 * 2:
+            message += f"• 热号策略：关注 {most_common_tema[0]:02d}（异常热）\n"
+        
+        if len(not_appeared) > 10:
+            message += f"• 回补策略：{len(not_appeared)}个号码从未出现\n"
+        
+        if most_common_zodiac[1] > total_periods/12 * 1.5:
+            emoji = ZODIAC_EMOJI.get(most_common_zodiac[0], '')
+            message += f"• 生肖策略：{emoji}{most_common_zodiac[0]}热度高\n"
+        
+        if least_common_zodiac[1] < total_periods/12 * 0.5:
+            emoji = ZODIAC_EMOJI.get(least_common_zodiac[0], '')
+            message += f"• 冷肖回补：{emoji}{least_common_zodiac[0]}严重遗漏\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
