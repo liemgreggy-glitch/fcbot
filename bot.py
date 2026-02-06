@@ -70,6 +70,13 @@ ZODIAC_NUMBERS = {
     '猪': [1, 13, 25, 37, 49]
 }
 
+# Zodiac emoji mapping
+ZODIAC_EMOJI = {
+    '鼠': '🐭', '牛': '🐮', '虎': '🐯', '兔': '🐰',
+    '龙': '🐉', '蛇': '🐍', '马': '🐴', '羊': '🐑',
+    '猴': '🐵', '鸡': '🐔', '狗': '🐶', '猪': '🐖'
+}
+
 # Reverse mapping: number to zodiac
 NUMBER_TO_ZODIAC = {}
 for zodiac, numbers in ZODIAC_NUMBERS.items():
@@ -742,9 +749,10 @@ class LotteryBot:
         
         for idx, num in enumerate(top5, 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             score = scores.get(num, 0)
             bar = "█" * int(score / 10)
-            message += f"{idx}. 号码 <b>{num:02d}</b> ({zodiac}) - {score:.1f}%\n"
+            message += f"{idx}. 号码 <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {score:.1f}%\n"
             message += f"   {bar}\n\n"
         
         countdown = self.get_countdown()
@@ -812,9 +820,10 @@ class LotteryBot:
         
         for idx, (num, count) in enumerate(most_common, 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             percentage = (count / len(tema_list)) * 100
             bar = "█" * int(percentage * 2)
-            message += f"{idx}. <b>{num:02d}</b> ({zodiac}) - {count}次 ({percentage:.1f}%)\n"
+            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次 ({percentage:.1f}%)\n"
             message += f"   {bar}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
@@ -834,8 +843,9 @@ class LotteryBot:
         for zodiac, data in sorted_zodiac:
             count = data['count']
             percentage = data['percentage']
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             bar = "█" * int(percentage / 2)
-            message += f"<b>{zodiac}</b> - {count}次 ({percentage:.1f}%)\n"
+            message += f"{zodiac_emoji}<b>{zodiac}</b> - {count}次 ({percentage:.1f}%)\n"
             message += f"{bar}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
@@ -853,11 +863,12 @@ class LotteryBot:
         
         for idx, (num, periods) in enumerate(missing, 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             if periods >= 50:
                 status = "未出现"
             else:
                 status = f"{periods}期"
-            message += f"{idx}. <b>{num:02d}</b> ({zodiac}) - {status}\n"
+            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {status}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -873,12 +884,14 @@ class LotteryBot:
         message += "🔥 <b>热号 Top 10：</b>\n"
         for idx, (num, count) in enumerate(analysis['hot'], 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
-            message += f"{idx}. <b>{num:02d}</b> ({zodiac}) - {count}次\n"
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
+            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次\n"
         
         message += "\n❄️ <b>冷号 Top 10：</b>\n"
         for idx, (num, count) in enumerate(analysis['cold'], 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
-            message += f"{idx}. <b>{num:02d}</b> ({zodiac}) - {count}次\n"
+            zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
+            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -922,9 +935,10 @@ class LotteryBot:
         
         for h in history[:10]:  # Show max 10 in one message
             codes = ' '.join([f"{x:02d}" for x in h['open_code'][:6]])
+            zodiac_emoji = ZODIAC_EMOJI.get(h['tema_zodiac'], '')
             message += f"<b>期号：</b>{h['expect']}\n"
             message += f"<b>号码：</b><code>{codes}</code>\n"
-            message += f"<b>特码：</b><code>{h['tema']:02d}</code> ({h['tema_zodiac']})\n"
+            message += f"<b>特码：</b><code>{h['tema']:02d}</code> {zodiac_emoji}{h['tema_zodiac']}\n"
             message += f"<b>时间：</b>{h['open_time']}\n"
             message += "─" * 30 + "\n"
         
@@ -1003,6 +1017,7 @@ class LotteryBot:
             return
         
         codes = ' '.join([f"{x:02d}" for x in result['open_code'][:6]])
+        zodiac_emoji = ZODIAC_EMOJI.get(result['tema_zodiac'], '')
         
         message = f"""
 📊 <b>最新开奖结果</b>
@@ -1013,7 +1028,7 @@ class LotteryBot:
 <b>号码：</b><code>{codes}</code>
 <b>特码：</b><code>{result['tema']:02d}</code> 🎯
 
-<b>生肖：</b>{result['tema_zodiac']} 🐲
+<b>生肖：</b>{zodiac_emoji}{result['tema_zodiac']}
 
 ─────────────────
 """
@@ -1163,6 +1178,7 @@ class LotteryBot:
         users = self.db.get_all_notify_users()
         
         codes = ' '.join([f"{x:02d}" for x in result['open_code'][:6]])
+        zodiac_emoji = ZODIAC_EMOJI.get(result['tema_zodiac'], '')
         
         message = f"""
 🎉 <b>开奖通知</b> 🎉
@@ -1173,7 +1189,7 @@ class LotteryBot:
 <b>号码：</b><code>{codes}</code>
 <b>特码：</b><code>{result['tema']:02d}</code> 🎯
 
-<b>生肖：</b>{result['tema_zodiac']} 🐲
+<b>生肖：</b>{zodiac_emoji}{result['tema_zodiac']}
 
 恭喜中奖的朋友！ 🎊
 """
