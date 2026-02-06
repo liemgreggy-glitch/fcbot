@@ -946,17 +946,20 @@ class PredictionEngine:
             current_missing = len(zodiac_list)
         
         # Find all appearances and calculate missing periods between them
+        # Note: zodiac_list is in reverse chronological order (newest first)
         appearances = []
         for i, z in enumerate(zodiac_list):
             if z == zodiac:
                 appearances.append(i)
         
-        # Calculate missing periods between appearances
+        # Calculate missing periods between consecutive appearances
         if appearances:
             gaps = []
             for i in range(len(appearances) - 1):
+                # Since appearances are in reverse order, later appearance has larger index
                 gap = appearances[i+1] - appearances[i] - 1
-                gaps.append(gap)
+                if gap >= 0:  # Only count positive gaps
+                    gaps.append(gap)
             
             max_missing = max(gaps) if gaps else current_missing
             avg_missing = sum(gaps) / len(gaps) if gaps else current_missing
@@ -1794,12 +1797,12 @@ class LotteryBot:
         recent_temas = tema_list[:10]
         recent_zodiacs = zodiac_list[:10]
         
-        # Count consecutive appearances
-        consecutive_count = 0
+        # Count consecutive number pairs (numbers differing by 1)
+        consecutive_pairs = 0
         if len(recent_temas) >= 2:
             for i in range(len(recent_temas) - 1):
                 if abs(recent_temas[i] - recent_temas[i+1]) == 1:
-                    consecutive_count += 1
+                    consecutive_pairs += 1
         
         # Zodiac distribution in recent 30
         zodiac_counter = Counter(zodiac_list)
@@ -1823,8 +1826,8 @@ class LotteryBot:
 ━━━━━━━━━━━━━━━━━━━━━
 📊 <b>走势特征分析</b>
 
-🔗 连号出现：{consecutive_count}次
-📍 连号概率：{consecutive_count/9*100:.1f}%
+🔗 连号出现：{consecutive_pairs}次
+📍 连号概率：{consecutive_pairs/9*100:.1f}%
 
 ━━━━━━━━━━━━━━━━━━━━━
 🐉 <b>生肖热度排行（30期）</b>
@@ -1843,9 +1846,9 @@ class LotteryBot:
 
 """
         
-        if consecutive_count >= 3:
+        if consecutive_pairs >= 3:
             message += "• 连号趋势明显，可关注连号组合\n"
-        elif consecutive_count == 0:
+        elif consecutive_pairs == 0:
             message += "• 近期无连号，下期可能出现\n"
         
         if len(top_zodiacs) > 0:
@@ -2275,8 +2278,9 @@ class LotteryBot:
 ━━━━━━━━━━━━━━━━━━━━━
 """
         
-        # Add prediction comparison if exists and has actual result
-        if prediction and prediction.get('actual_tema') is not None:
+        # Add prediction comparison if exists and result has been recorded
+        # is_hit > 0 means result has been compared (1=hit, 2=miss)
+        if prediction and prediction.get('is_hit', 0) > 0:
             pred_z1 = prediction['predict_zodiac1']
             pred_z2 = prediction['predict_zodiac2']
             emoji1 = ZODIAC_EMOJI.get(pred_z1, '')
@@ -2308,8 +2312,8 @@ class LotteryBot:
 """
                 if hit_stats['recent_10_total'] > 0:
                     message += f"近10期：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%\n"
-            else:
-                # is_hit == 2, meaning it's a miss
+            elif prediction['is_hit'] == 2:
+                # is_hit == 2 means it's a miss
                 message += f"💔 <b>很遗憾，本期预测未中</b>\n"
             
             message += "\n━━━━━━━━━━━━━━━━━━━━━\n"
