@@ -1126,6 +1126,12 @@ class LotteryBot:
         elif data.startswith("predict_"):
             method = data.replace("predict_", "")
             await self.show_prediction(query, method)
+        elif data == "ai_zodiac_predict":
+            await self.show_ai_zodiac_predict(query)
+        elif data == "do_zodiac_prediction":
+            await self.perform_zodiac_prediction(query)
+        elif data == "prediction_history":
+            await self.show_prediction_history(query)
         
         # Analysis handlers
         elif data == "analysis_frequency":
@@ -1156,12 +1162,41 @@ class LotteryBot:
     
     async def show_predict_menu(self, query):
         """Show prediction menu"""
-        message = """
+        # Get next period number
+        latest = self.db.get_latest_result()
+        if latest:
+            next_expect = str(int(latest['expect']) + 1)
+        else:
+            next_expect = "未知"
+        
+        countdown = self.get_countdown()
+        
+        # Check if prediction exists for next period
+        can_predict = self.db.can_predict(next_expect) if latest else False
+        prediction_status = "未预测" if can_predict else "✅ 已预测（已锁定）"
+        
+        message = f"""
 🎯 <b>智能预测菜单</b>
 
-请选择预测方式：
+━━━━━━━━━━━━━━━━━━━━━
+📅 下期期号：{next_expect}
+⏰ 开奖倒计时：{countdown}
 
-• <b>AI综合预测</b> - 多因素综合分析
+━━━━━━━━━━━━━━━━━━━━━
+🔮 <b>AI 生肖预测（TOP 2）</b> ⭐ 推荐
+
+基于多维度分析预测最可能的2个生肖
+• 频率分析 (30%)
+• 遗漏分析 (30%)
+• 周期分析 (20%)
+• 趋势分析 (20%)
+
+📊 预测状态：{prediction_status}
+
+━━━━━━━━━━━━━━━━━━━━━
+<b>其他预测方式</b>
+
+• <b>AI综合预测</b> - 多因素综合分析（TOP 5）
 • <b>生肖预测</b> - 基于生肖周期
 • <b>热号预测</b> - 近期高频号码
 • <b>冷号预测</b> - 长期未出号码
@@ -1170,12 +1205,14 @@ class LotteryBot:
 """
         
         keyboard = [
+            [InlineKeyboardButton("🔮 AI 生肖预测（TOP 2）⭐", callback_data="ai_zodiac_predict")],
             [InlineKeyboardButton("🤖 AI综合预测", callback_data="predict_comprehensive")],
             [InlineKeyboardButton("🐲 生肖预测", callback_data="predict_zodiac")],
             [
                 InlineKeyboardButton("🔥 热号预测", callback_data="predict_hot"),
                 InlineKeyboardButton("❄️ 冷号预测", callback_data="predict_cold"),
             ],
+            [InlineKeyboardButton("📊 预测历史", callback_data="prediction_history")],
             [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1218,6 +1255,374 @@ class LotteryBot:
         keyboard = [
             [InlineKeyboardButton("🔄 重新预测", callback_data=f"predict_{method}")],
             [InlineKeyboardButton("🔙 返回预测菜单", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_ai_zodiac_predict(self, query):
+        """Show AI zodiac prediction interface"""
+        # Get next period
+        latest = self.db.get_latest_result()
+        if not latest:
+            await query.edit_message_text(
+                "❌ 暂无历史数据，请稍后再试",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="menu_predict")]])
+            )
+            return
+        
+        next_expect = str(int(latest['expect']) + 1)
+        
+        # Check if already predicted
+        if not self.db.can_predict(next_expect):
+            # Show existing prediction
+            await self.show_existing_zodiac_prediction(query, next_expect)
+            return
+        
+        # Show prediction prompt
+        countdown = self.get_countdown()
+        
+        message = f"""
+🔮 <b>AI 生肖预测（TOP 2）</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+📅 预测期号：{next_expect}
+⏰ 开奖倒计时：{countdown}
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 预测状态：<b>未预测</b>
+
+💡 <b>提示：</b>
+• 每期仅可预测一次
+• 预测后自动锁定，不可修改
+• 开奖后自动对比结果
+• 结果将记录到历史
+
+━━━━━━━━━━━━━━━━━━━━━
+🤖 <b>AI 分析维度：</b>
+
+✅ 生肖频率分析（30%权重）
+✅ 生肖遗漏分析（30%权重）
+✅ 生肖周期分析（20%权重）
+✅ 生肖趋势分析（20%权重）
+
+分析期数：最近100期历史数据
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("🎲 开始预测", callback_data="do_zodiac_prediction")],
+            [InlineKeyboardButton("📈 查看历史命中率", callback_data="prediction_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def perform_zodiac_prediction(self, query):
+        """Perform zodiac prediction with animation"""
+        # Get next period
+        latest = self.db.get_latest_result()
+        if not latest:
+            await query.answer("❌ 暂无历史数据", show_alert=True)
+            return
+        
+        next_expect = str(int(latest['expect']) + 1)
+        
+        # Check if already predicted
+        if not self.db.can_predict(next_expect):
+            await query.answer("⚠️ 本期已预测，不可重复预测", show_alert=True)
+            await self.show_existing_zodiac_prediction(query, next_expect)
+            return
+        
+        # Show progress animation
+        progress_msg = """
+⏳ <b>AI 正在分析历史数据...</b>
+
+✅ 加载最近100期历史数据...
+"""
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        
+        progress_msg += "✅ 分析49个号码出现频率...\n"
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        
+        progress_msg += "✅ 计算12生肖遗漏值...\n"
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        
+        progress_msg += "✅ 分析生肖周期规律...\n"
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        
+        progress_msg += "✅ 统计冷热号走势...\n"
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(0.5)
+        
+        progress_msg += "✅ 综合评分排序...\n\n🤖 AI 预测生成完成！"
+        await query.edit_message_text(progress_msg, parse_mode='HTML')
+        await asyncio.sleep(1)
+        
+        # Perform prediction
+        prediction = self.predictor.predict_top2_zodiac(100)
+        
+        # Save to database
+        self.db.save_zodiac_prediction(
+            expect=next_expect,
+            zodiac1=prediction['zodiac1'],
+            zodiac2=prediction['zodiac2'],
+            numbers1=prediction['numbers1'],
+            numbers2=prediction['numbers2'],
+            score1=prediction['score1'],
+            score2=prediction['score2'],
+            analysis_data=prediction['analysis']
+        )
+        
+        # Show prediction result
+        await self.display_zodiac_prediction(query, next_expect, prediction)
+    
+    async def display_zodiac_prediction(self, query, expect: str, prediction: Dict):
+        """Display zodiac prediction result"""
+        countdown = self.get_countdown()
+        
+        zodiac1 = prediction['zodiac1']
+        zodiac2 = prediction['zodiac2']
+        emoji1 = ZODIAC_EMOJI.get(zodiac1, '')
+        emoji2 = ZODIAC_EMOJI.get(zodiac2, '')
+        
+        numbers1_str = ', '.join(f"{n:02d}" for n in prediction['numbers1'])
+        numbers2_str = ', '.join(f"{n:02d}" for n in prediction['numbers2'])
+        
+        score1 = prediction['score1']
+        score2 = prediction['score2']
+        
+        # Get detailed analysis
+        history = self.db.get_history(100)
+        details1 = self.predictor.get_zodiac_analysis_details(history, zodiac1)
+        details2 = self.predictor.get_zodiac_analysis_details(history, zodiac2)
+        
+        # Stars for score
+        stars1 = "⭐" * min(5, int(score1 / 20))
+        stars2 = "⭐" * min(5, int(score2 / 20))
+        
+        # Get hit rate
+        hit_stats = self.db.calculate_hit_rate()
+        
+        message = f"""
+🔮 <b>AI 生肖预测（{expect}期）</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
+📊 开奖倒计时：{countdown}
+📈 分析期数：100期
+
+━━━━━━━━━━━━━━━━━━━━━
+🥇 <b>推荐生肖一：{emoji1} {zodiac1}</b>
+
+📊 综合评分：{score1:.1f}/100 {stars1}
+
+🔍 <b>分析依据：</b>
+✅ 出现次数：{details1['count']}次/100期
+✅ 当前遗漏：{details1['current_missing']}期
+✅ 最大遗漏：{details1['max_missing']}期
+✅ 平均遗漏：{details1['avg_missing']:.1f}期
+✅ 出现频率：{details1['percentage']:.1f}%
+
+🎯 <b>对应号码：</b>{numbers1_str}
+
+━━━━━━━━━━━━━━━━━━━━━
+🥈 <b>推荐生肖二：{emoji2} {zodiac2}</b>
+
+📊 综合评分：{score2:.1f}/100 {stars2}
+
+🔍 <b>分析依据：</b>
+✅ 出现次数：{details2['count']}次/100期
+✅ 当前遗漏：{details2['current_missing']}期
+✅ 最大遗漏：{details2['max_missing']}期
+✅ 平均遗漏：{details2['avg_missing']:.1f}期
+✅ 出现频率：{details2['percentage']:.1f}%
+
+🎯 <b>对应号码：</b>{numbers2_str}
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        if hit_stats['total'] > 0:
+            message += f"""
+📊 <b>历史命中率统计</b>
+
+总预测次数：{hit_stats['total']}期
+命中次数：{hit_stats['hits']}期
+总命中率：{hit_stats['hit_rate']:.1f}% 📈
+
+"""
+            if hit_stats['recent_10_total'] > 0:
+                message += f"近10期表现：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%\n"
+            if hit_stats['recent_5_total'] > 0:
+                message += f"近5期表现：{hit_stats['recent_5_hits']}/{hit_stats['recent_5_total']} = {hit_stats['recent_5_rate']:.1f}%\n"
+            message += "\n"
+        
+        message += """
+━━━━━━━━━━━━━━━━━━━━━
+⚠️ <b>重要提示</b>
+
+✅ 本期预测已锁定，无法修改
+✅ 开奖后将自动对比结果
+✅ 结果将记录到预测历史
+
+💡 <i>预测仅供参考，请理性对待</i>
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 查看预测历史", callback_data="prediction_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_existing_zodiac_prediction(self, query, expect: str):
+        """Show existing prediction for a period"""
+        record = self.db.get_prediction_record(expect)
+        
+        if not record:
+            await query.edit_message_text(
+                "❌ 未找到预测记录",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="menu_predict")]])
+            )
+            return
+        
+        countdown = self.get_countdown()
+        
+        zodiac1 = record['predict_zodiac1']
+        zodiac2 = record['predict_zodiac2']
+        emoji1 = ZODIAC_EMOJI.get(zodiac1, '')
+        emoji2 = ZODIAC_EMOJI.get(zodiac2, '')
+        
+        message = f"""
+🔮 <b>AI 生肖预测（{expect}期）</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+⏰ 开奖倒计时：{countdown}
+
+📊 本期预测状态：<b>✅ 已预测（已锁定）</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+🎯 <b>本期预测结果</b>
+
+🥇 推荐生肖一：{emoji1} {zodiac1} ({record['predict_numbers1']})
+🥈 推荐生肖二：{emoji2} {zodiac2} ({record['predict_numbers2']})
+
+━━━━━━━━━━━━━━━━━━━━━
+📅 预测时间：{record['predict_time']}
+⏰ 开奖时间：预计 21:32:32
+
+💡 提示：开奖后将自动对比预测结果
+"""
+        
+        # If already drawn, show comparison
+        if record['is_hit'] > 0:
+            actual_zodiac = record['actual_zodiac']
+            actual_emoji = ZODIAC_EMOJI.get(actual_zodiac, '')
+            
+            message += f"""
+
+━━━━━━━━━━━━━━━━━━━━━
+🎰 <b>开奖结果对比</b>
+
+实际开出：<b>{record['actual_tema']:02d}</b> {actual_emoji}{actual_zodiac}
+
+"""
+            if record['is_hit'] == 1:
+                if record['hit_rank'] == 1:
+                    message += f"🎉 <b>恭喜！TOP1 生肖预测命中！</b> ✅\n\n"
+                    message += f"预测生肖一：{emoji1} {zodiac1} ✅ 命中！\n"
+                    message += f"预测生肖二：{emoji2} {zodiac2}\n"
+                else:
+                    message += f"🎊 <b>TOP2 生肖预测命中！</b> ✅\n\n"
+                    message += f"预测生肖一：{emoji1} {zodiac1}\n"
+                    message += f"预测生肖二：{emoji2} {zodiac2} ✅ 命中！\n"
+            else:
+                message += f"💔 <b>很遗憾，本期预测未中</b>\n\n"
+                message += f"预测生肖一：{emoji1} {zodiac1} ❌\n"
+                message += f"预测生肖二：{emoji2} {zodiac2} ❌\n"
+        
+        message += """
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 查看预测历史", callback_data="prediction_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_prediction_history(self, query):
+        """Show prediction history with hit rate"""
+        records = self.db.get_prediction_history(10)
+        hit_stats = self.db.calculate_hit_rate()
+        
+        if not records:
+            message = """
+📊 <b>预测历史记录</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+暂无预测历史记录
+
+请先进行预测后查看
+"""
+        else:
+            message = f"""
+📊 <b>预测历史记录</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 <b>总体统计</b>
+
+总预测次数：{hit_stats['total']}期
+命中次数：{hit_stats['hits']}期
+总命中率：{hit_stats['hit_rate']:.1f}% 📈
+
+"""
+            
+            if hit_stats['recent_10_total'] > 0:
+                message += f"\n近10期表现：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%"
+            if hit_stats['recent_5_total'] > 0:
+                message += f"\n近5期表现：{hit_stats['recent_5_hits']}/{hit_stats['recent_5_total']} = {hit_stats['recent_5_rate']:.1f}%"
+            
+            message += """
+
+━━━━━━━━━━━━━━━━━━━━━
+📅 <b>最近预测记录</b>
+
+"""
+            
+            for record in records[:10]:
+                z1 = record['predict_zodiac1']
+                z2 = record['predict_zodiac2']
+                emoji1 = ZODIAC_EMOJI.get(z1, '')
+                emoji2 = ZODIAC_EMOJI.get(z2, '')
+                
+                result_str = ""
+                if record['is_hit'] == 1:
+                    if record['hit_rank'] == 1:
+                        result_str = f"✅ TOP1命中（{ZODIAC_EMOJI.get(record['actual_zodiac'], '')}{record['actual_zodiac']}）"
+                    else:
+                        result_str = f"✅ TOP2命中（{ZODIAC_EMOJI.get(record['actual_zodiac'], '')}{record['actual_zodiac']}）"
+                else:
+                    result_str = f"❌ 未中（{ZODIAC_EMOJI.get(record['actual_zodiac'], '')}{record['actual_zodiac']}）"
+                
+                message += f"{record['expect']}  预测:{emoji1}{z1}{emoji2}{z2}  {result_str}\n"
+            
+            message += "\n━━━━━━━━━━━━━━━━━━━━━"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔮 开始预测", callback_data="ai_zodiac_predict")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1617,6 +2022,9 @@ class LotteryBot:
             
             self.last_expect = expect
             
+            # Update prediction result if exists
+            self.db.update_prediction_result(expect, result['tema'], result['tema_zodiac'])
+            
             # Notify all users with notifications enabled
             await self.notify_users(result, context)
             
@@ -1624,27 +2032,70 @@ class LotteryBot:
             logger.error(f"Error checking new result: {e}")
     
     async def notify_users(self, result: Dict, context: ContextTypes.DEFAULT_TYPE):
-        """Notify users about new result"""
+        """Notify users about new result with prediction comparison"""
         users = self.db.get_all_notify_users()
         
         codes = ' '.join([f"{x:02d}" for x in result['open_code'][:6]])
         zodiac_emoji = ZODIAC_EMOJI.get(result['tema_zodiac'], '')
         
+        # Check if there's a prediction for this period
+        prediction = self.db.get_prediction_record(result['expect'])
+        
         message = f"""
-🎉 <b>开奖通知</b> 🎉
+🎰 <b>【新开奖结果】</b>
 
-<b>期号：</b>{result['expect']}
-<b>开奖时间：</b>{result['open_time']}
+━━━━━━━━━━━━━━━━━━━━━
+📅 期号：{result['expect']}
+⏰ 时间：{result['open_time']}
 
-<b>号码：</b><code>{codes}</code>
-<b>特码：</b><code>{result['tema']:02d}</code> 🎯
+🎲 正码：<code>{codes}</code>
 
-<b>生肖：</b>{zodiac_emoji}{result['tema_zodiac']}
-
-恭喜中奖的朋友！ 🎊
+━━━━━━━━━━━━━━━━━━━━━
+🌟 <b>特码：{result['tema']:02d}</b>  {zodiac_emoji}{result['tema_zodiac']}
+━━━━━━━━━━━━━━━━━━━━━
 """
         
-        keyboard = [[InlineKeyboardButton("🎯 预测下期", callback_data="menu_predict")]]
+        # Add prediction comparison if exists
+        if prediction and prediction['is_hit'] > 0:
+            pred_z1 = prediction['predict_zodiac1']
+            pred_z2 = prediction['predict_zodiac2']
+            emoji1 = ZODIAC_EMOJI.get(pred_z1, '')
+            emoji2 = ZODIAC_EMOJI.get(pred_z2, '')
+            
+            message += f"""
+
+🔮 <b>AI 预测对比</b>
+
+预测：{emoji1}{pred_z1} + {emoji2}{pred_z2}
+结果：{zodiac_emoji}{result['tema_zodiac']}
+
+"""
+            
+            if prediction['is_hit'] == 1:
+                if prediction['hit_rank'] == 1:
+                    message += f"🎉 <b>预测命中！TOP1 生肖正确！</b>\n"
+                else:
+                    message += f"🎊 <b>预测命中！TOP2 生肖正确！</b>\n"
+                
+                # Get hit rate stats
+                hit_stats = self.db.calculate_hit_rate()
+                message += f"""
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>命中率统计</b>
+
+总命中率：{hit_stats['hit_rate']:.1f}%
+"""
+                if hit_stats['recent_10_total'] > 0:
+                    message += f"近10期：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%\n"
+            else:
+                message += f"💔 <b>很遗憾，本期预测未中</b>\n"
+            
+            message += "\n━━━━━━━━━━━━━━━━━━━━━\n"
+        
+        message += "\n恭喜中奖的朋友！ 🎊"
+        
+        keyboard = [[InlineKeyboardButton("🎯 预测下期", callback_data="ai_zodiac_predict")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         for user_id in users:
