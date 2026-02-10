@@ -117,11 +117,21 @@ ELEMENTS_RESTRICT = {
     '木': '土', '土': '水', '水': '火', '火': '金', '金': '木'
 }
 
+# Random perturbation range for score variation
+RANDOM_PERTURBATION_RANGE = 15
+
+# Monte Carlo simulation iterations (trade-off: 1000 for accuracy, 100 for performance)
+MONTE_CARLO_ITERATIONS = 100
+
 # Color Wave mapping (49 numbers divided into 3 waves)
-# Red wave: special numbers, Blue wave: numbers divisible by 3, Green wave: others
+# Red wave: historically considered "lucky" numbers in Chinese culture
+# Blue wave: numbers divisible by 3
+# Green wave: all other numbers
+RED_WAVE_NUMBERS = [1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46]
+
 def get_color_wave(num: int) -> str:
     """Get color wave for a number"""
-    if num in [1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46]:
+    if num in RED_WAVE_NUMBERS:
         return '红'  # Red
     elif num % 3 == 0:
         return '蓝'  # Blue
@@ -303,8 +313,8 @@ class PredictionEngineUltimate:
         scores['repeat_penalty'] = self._score_repeat_penalty(zodiac, recent_predictions) * 0.03
         scores['prime_composite'] = self._score_prime_composite(history, zodiac) * 0.02
         
-        # Random perturbation (±15 for more variation)
-        scores['random_factor'] = random.uniform(-15, 15)
+        # Random perturbation
+        scores['random_factor'] = random.uniform(-RANDOM_PERTURBATION_RANGE, RANDOM_PERTURBATION_RANGE)
         
         # Calculate total score
         total_score = sum(scores.values())
@@ -701,7 +711,8 @@ class PredictionEngineUltimate:
     def _score_monte_carlo(self, history: List[Dict], zodiac: str) -> float:
         """Monte Carlo simulation (5%)
         
-        Simulates 1000 future draws based on historical probability.
+        Simulates future draws based on historical probability.
+        Uses reduced iteration count (100) for performance vs accuracy trade-off.
         """
         if len(history) < 10:
             return 50.0
@@ -721,11 +732,10 @@ class PredictionEngineUltimate:
         prob_sum = sum(probabilities.values())
         probabilities = {z: p / prob_sum for z, p in probabilities.items()}
         
-        # Monte Carlo simulation (simplified without NumPy)
-        simulation_count = 100  # Reduced for performance
+        # Monte Carlo simulation
         simulated_count = 0
         
-        for _ in range(simulation_count):
+        for _ in range(MONTE_CARLO_ITERATIONS):
             # Weighted random choice
             rand_val = random.random()
             cumulative = 0.0
@@ -737,7 +747,7 @@ class PredictionEngineUltimate:
                     break
         
         # Score based on simulation result
-        simulated_probability = simulated_count / simulation_count
+        simulated_probability = simulated_count / MONTE_CARLO_ITERATIONS
         return simulated_probability * 100
     
     def _score_repeat_penalty(self, zodiac: str, recent_predictions: List[str]) -> float:

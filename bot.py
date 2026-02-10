@@ -34,7 +34,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
-from prediction_engine_ultimate import PredictionEngineUltimate
+from prediction_engine_ultimate import PredictionEngineUltimate, TRADITIONAL_TO_SIMPLIFIED
 
 # Load environment variables
 load_dotenv()
@@ -463,8 +463,9 @@ class DatabaseHandler:
     
     def update_prediction_result(self, expect: str, actual_tema: int, actual_zodiac: str):
         """Update prediction record with actual result"""
-        # Convert traditional Chinese to simplified Chinese
-        actual_zodiac = actual_zodiac.replace("龍", "龙").replace("馬", "马").replace("豬", "猪").replace("雞", "鸡")
+        # Convert traditional Chinese to simplified Chinese using shared mapping
+        for trad, simp in TRADITIONAL_TO_SIMPLIFIED.items():
+            actual_zodiac = actual_zodiac.replace(trad, simp)
         
         conn = self.get_connection()
         cursor = conn.cursor()
