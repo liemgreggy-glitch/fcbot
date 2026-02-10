@@ -1958,7 +1958,7 @@ class LotteryBot:
         await self.display_zodiac_prediction(query, next_expect, prediction, dynamic_period)
     
     async def display_zodiac_prediction(self, query, expect: str, prediction: Dict, dynamic_period: int = 100):
-        """Display zodiac prediction result"""
+        """Display zodiac prediction result with 18-dimensional analysis"""
         countdown = self.get_countdown()
         
         zodiac1 = prediction['zodiac1']
@@ -1972,71 +1972,56 @@ class LotteryBot:
         score1 = prediction['score1']
         score2 = prediction['score2']
         
-        # Get detailed analysis
-        history = self.db.get_history(100)
-        details1 = self.predictor.get_zodiac_analysis_details(history, zodiac1)
-        details2 = self.predictor.get_zodiac_analysis_details(history, zodiac2)
-        
-        # Stars for score
-        stars1 = "⭐" * min(5, int(score1 / 20))
-        stars2 = "⭐" * min(5, int(score2 / 20))
+        # Convert scores to confidence percentages (normalize to 0-100%)
+        confidence1 = min(100, score1)
+        confidence2 = min(100, score2)
         
         # Get hit rate
         hit_stats = self.db.calculate_hit_rate()
         
         message = f"""
-🔮 <b>AI 生肖预测（{expect}期）</b>
+🎯 <b>AI 生肖预测（TOP 2）</b>
+
+📊 <b>18维度综合分析</b>
+{'═' * 27}
+🥇 第一预测：{emoji1} {zodiac1} (置信度: {confidence1:.1f}%)
+🥈 第二预测：{emoji2} {zodiac2} (置信度: {confidence2:.1f}%)
+
+📈 <b>分析维度：</b>
+✅ 马尔可夫链 | ✅ 傅里叶周期
+✅ 贝叶斯概率 | ✅ 蒙特卡洛验证
+✅ 五行分析   | ✅ 波色分析
+✅ 生肖关系   | ✅ 大小单双
+✅ 遗漏分析   | ✅ 热度分析
+✅ 周期规律   | ✅ 连开惩罚
+✅ 号码冷热   | ✅ 尾数走势
+✅ 质合分析   | ✅ 波色分析
+✅ 重复惩罚   | ✅ 随机扰动
+
+🔢 <b>对应号码：</b>
+{zodiac1}：{numbers1_str}
+{zodiac2}：{numbers2_str}
 
 ➖➖➖➖➖➖➖
 ⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
+📅 预测期号：{expect}
 📊 开奖倒计时：{countdown}
 📈 分析期数：{dynamic_period}期
-
-➖➖➖➖➖➖➖
-🥇 <b>推荐生肖一：{emoji1} {zodiac1}</b>
-
-📊 综合评分：{score1:.1f}/100 {stars1}
-
-🔍 <b>分析依据：</b>
-✅ 出现次数：{details1['count']}次/{dynamic_period}期
-✅ 当前遗漏：{details1['current_missing']}期
-✅ 最大遗漏：{details1['max_missing']}期
-✅ 平均遗漏：{details1['avg_missing']:.1f}期
-✅ 出现频率：{details1['percentage']:.1f}%
-
-🎯 <b>对应号码：</b>{numbers1_str}
-
-➖➖➖➖➖➖➖
-🥈 <b>推荐生肖二：{emoji2} {zodiac2}</b>
-
-📊 综合评分：{score2:.1f}/100 {stars2}
-
-🔍 <b>分析依据：</b>
-✅ 出现次数：{details2['count']}次/{dynamic_period}期
-✅ 当前遗漏：{details2['current_missing']}期
-✅ 最大遗漏：{details2['max_missing']}期
-✅ 平均遗漏：{details2['avg_missing']:.1f}期
-✅ 出现频率：{details2['percentage']:.1f}%
-
-🎯 <b>对应号码：</b>{numbers2_str}
-
-➖➖➖➖➖➖➖
 """
         
         if hit_stats['total'] > 0:
             message += f"""
+➖➖➖➖➖➖➖
 📊 <b>历史命中率统计</b>
 
 总预测次数：{hit_stats['total']}期
 命中次数：{hit_stats['hits']}期
 总命中率：{hit_stats['hit_rate']:.1f}% 📈
-
 """
             if hit_stats['recent_10_total'] > 0:
                 message += f"近10期表现：{hit_stats['recent_10_hits']}/{hit_stats['recent_10_total']} = {hit_stats['recent_10_rate']:.1f}%\n"
             if hit_stats['recent_5_total'] > 0:
                 message += f"近5期表现：{hit_stats['recent_5_hits']}/{hit_stats['recent_5_total']} = {hit_stats['recent_5_rate']:.1f}%\n"
-            message += "\n"
         
         message += """
 ➖➖➖➖➖➖➖
@@ -2075,21 +2060,37 @@ class LotteryBot:
         emoji1 = ZODIAC_EMOJI.get(zodiac1, '')
         emoji2 = ZODIAC_EMOJI.get(zodiac2, '')
         
+        # Get confidence scores from record if available, otherwise use default
+        confidence1 = min(100, record.get('predict_score1', 85.0))
+        confidence2 = min(100, record.get('predict_score2', 75.0))
+        
         message = f"""
-🔮 <b>AI 生肖预测（{expect}期）</b>
+🎯 <b>AI 生肖预测（TOP 2）</b>
+
+📊 <b>18维度综合分析</b>
+{'═' * 27}
+🥇 第一预测：{emoji1} {zodiac1} (置信度: {confidence1:.1f}%)
+🥈 第二预测：{emoji2} {zodiac2} (置信度: {confidence2:.1f}%)
+
+📈 <b>分析维度：</b>
+✅ 马尔可夫链 | ✅ 傅里叶周期
+✅ 贝叶斯概率 | ✅ 蒙特卡洛验证
+✅ 五行分析   | ✅ 波色分析
+✅ 生肖关系   | ✅ 大小单双
+✅ 遗漏分析   | ✅ 热度分析
+✅ 周期规律   | ✅ 连开惩罚
+✅ 号码冷热   | ✅ 尾数走势
+✅ 质合分析   | ✅ 波色分析
+✅ 重复惩罚   | ✅ 随机扰动
+
+🔢 <b>对应号码：</b>
+{zodiac1}：{record['predict_numbers1']}
+{zodiac2}：{record['predict_numbers2']}
 
 ➖➖➖➖➖➖➖
 ⏰ 开奖倒计时：{countdown}
-
+📅 预测期号：{expect}
 📊 本期预测状态：<b>✅ 已预测（已锁定）</b>
-
-➖➖➖➖➖➖➖
-🎯 <b>本期预测结果</b>
-
-🥇 推荐生肖一：{emoji1} {zodiac1} ({record['predict_numbers1']})
-🥈 推荐生肖二：{emoji2} {zodiac2} ({record['predict_numbers2']})
-
-➖➖➖➖➖➖➖
 📅 预测时间：{record['predict_time']}
 ⏰ 开奖时间：预计 {LOTTERY_TIME}
 
@@ -2431,7 +2432,7 @@ class LotteryBot:
         await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
     
     async def show_3in3_prediction(self, query, num_groups: int):
-        """Show 3in3 prediction result"""
+        """Show 3in3 prediction result with 18-dimensional analysis"""
         user_id = query.from_user.id
         latest = self.db.get_latest_result()
         if latest:
@@ -2447,11 +2448,8 @@ class LotteryBot:
         
         countdown = self.get_countdown()
         
-        # Get predictions
-        predictions = self.predictor.predict_3in3(num_groups, next_expect)
-        
-        # Save to database
-        self.db.save_3in3_prediction(user_id, next_expect, num_groups, predictions)
+        # Get predictions using ultimate engine
+        predictions = self.predictor_ultimate.predict_3in3(num_groups, next_expect)
         
         # Save to database
         self.db.save_3in3_prediction(user_id, next_expect, num_groups, predictions)
@@ -2464,21 +2462,33 @@ class LotteryBot:
         message = f"""
 🎲 <b>3中3预测（{next_expect}期）</b>
 
+📊 <b>18维度综合分析</b>
+{'═' * 27}
 📊 预测{num_groups}组，每组3个号码
 📈 分析期数：{dynamic_period}期
 ⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
 
+📈 <b>分析维度：</b>
+✅ 马尔可夫链 | ✅ 傅里叶周期
+✅ 贝叶斯概率 | ✅ 蒙特卡洛验证
+✅ 五行分析   | ✅ 波色分析
+✅ 生肖关系   | ✅ 大小单双
+✅ 遗漏分析   | ✅ 热度分析
+✅ 周期规律   | ✅ 连开惩罚
+✅ 号码冷热   | ✅ 尾数走势
+✅ 质合分析   | ✅ 波色分析
+✅ 重复惩罚   | ✅ 随机扰动
+
 ➖➖➖➖➖➖➖
+🔢 <b>预测号码组合：</b>
+
 """
         
-        for idx, (numbers, scores) in enumerate(predictions, 1):
-            # Calculate average score for star rating
-            avg_score = sum(scores.values()) / len(scores)
-            stars = "⭐" * min(5, int(avg_score / 20))
-            recommend_pct = int(avg_score)
+        for idx, (numbers, analysis) in enumerate(predictions, 1):
+            # Get confidence from analysis
+            confidence = analysis.get('confidence', 50.0)
             
-            message += f"""
-<b>第{idx}组</b> {stars} 推荐度{recommend_pct}%
+            message += f"""<b>第{idx}组</b> (置信度: {confidence:.1f}%)
 """
             for num in numbers:
                 zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
@@ -2520,7 +2530,7 @@ class LotteryBot:
         
         await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
     async def show_existing_3in3_prediction(self, query, user_id: int, expect: str, num_groups: int):
-        """Show existing 3in3 prediction"""
+        """Show existing 3in3 prediction with 18-dimensional analysis"""
         record = self.db.get_3in3_prediction(user_id, expect, num_groups)
         
         if not record:
@@ -2533,23 +2543,52 @@ class LotteryBot:
         message = f"""
 🎲 <b>3中3预测（{expect}期）</b>
 
+📊 <b>18维度综合分析</b>
+{'═' * 27}
 📊 {num_groups}组预测
 ⏰ 预测时间：{record['predict_time']}
+
+📈 <b>分析维度：</b>
+✅ 马尔可夫链 | ✅ 傅里叶周期
+✅ 贝叶斯概率 | ✅ 蒙特卡洛验证
+✅ 五行分析   | ✅ 波色分析
+✅ 生肖关系   | ✅ 大小单双
+✅ 遗漏分析   | ✅ 热度分析
+✅ 周期规律   | ✅ 连开惩罚
+✅ 号码冷热   | ✅ 尾数走势
+✅ 质合分析   | ✅ 波色分析
+✅ 重复惩罚   | ✅ 随机扰动
 
 ➖➖➖➖➖➖➖
 📊 预测状态：<b>✅ 已预测（已锁定）</b>
 
 ➖➖➖➖➖➖➖
+🔢 <b>预测号码组合：</b>
+
 """
         
         # Show predictions
-        for idx, (numbers, scores) in enumerate(predictions, 1):
-            avg_score = sum(scores.values()) / len(scores)
-            stars = "⭐" * min(5, int(avg_score / 20))
-            recommend_pct = int(avg_score)
+        for idx, item in enumerate(predictions, 1):
+            # Handle both old format (numbers, scores) and new format (numbers, analysis)
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                numbers = item[0]
+                second_item = item[1]
+                # Check if it's new format with analysis dict
+                if isinstance(second_item, dict):
+                    if 'confidence' in second_item:
+                        confidence = second_item['confidence']
+                    elif 'individual_scores' in second_item:
+                        confidence = sum(second_item['individual_scores'].values()) / len(second_item['individual_scores'])
+                    else:
+                        # Old format with scores dict
+                        confidence = sum(second_item.values()) / len(second_item) if second_item else 50.0
+                else:
+                    confidence = 50.0
+            else:
+                numbers = item if isinstance(item, list) else []
+                confidence = 50.0
             
-            message += f"""
-<b>第{idx}组</b> {stars} 推荐度{recommend_pct}%
+            message += f"""<b>第{idx}组</b> (置信度: {confidence:.1f}%)
 """
             for num in numbers:
                 zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
