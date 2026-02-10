@@ -805,3 +805,556 @@ class PredictionEngineUltimate:
             return 80.0
         else:
             return 50.0
+    
+    def predict_3in3(self, num_groups: int = 1, expect: str = None) -> List[Tuple[List[int], Dict]]:
+        """
+        3中3预测 - 使用18维度分析预测七色球中可能出现的3个号码
+        
+        Args:
+            num_groups: 预测组数（1/3/5/10）
+            expect: 期号用于一致性
+            
+        Returns:
+            [(号码组, 分析详情), ...] 每组包含3个号码及其评分详情
+        """
+        # Dynamic history range based on expect number
+        if expect:
+            period_num = int(expect[-3:])
+            ranges = {0: 300, 1: 200, 2: 100, 3: 50, 4: 30}
+            dynamic_period = ranges[period_num % 5]
+            random.seed(int(expect) * 100 + num_groups)
+        else:
+            dynamic_period = 100
+            random.seed(int(datetime.now().timestamp()))
+        
+        history = self.db.get_history(dynamic_period)
+        
+        if not history:
+            # No history, random generation
+            result_groups = []
+            for _ in range(num_groups):
+                top3 = sorted(random.sample(range(1, 50), 3))
+                scores = {
+                    'numbers': top3,
+                    'confidence': 50.0,
+                    'individual_scores': {num: 50.0 for num in top3}
+                }
+                result_groups.append((top3, scores))
+            random.seed()
+            return result_groups
+        
+        # Calculate comprehensive scores for all 49 numbers using 18 dimensions
+        number_scores = {}
+        
+        for num in range(1, 50):
+            score = self._calculate_number_score_18d(history, num, dynamic_period, expect)
+            number_scores[num] = score
+        
+        # Sort numbers by total score
+        sorted_numbers = sorted(
+            number_scores.items(),
+            key=lambda x: x[1]['total_score'],
+            reverse=True
+        )
+        
+        # Generate multiple prediction groups
+        result_groups = []
+        
+        for group_idx in range(num_groups):
+            if num_groups == 1:
+                # For single group, take TOP 3
+                top3_nums = [num for num, _ in sorted_numbers[:3]]
+            else:
+                # For multiple groups, stagger selection for diversity
+                candidates = sorted_numbers[:min(30, len(sorted_numbers))]
+                top3_nums = []
+                
+                for i in range(3):
+                    offset = group_idx * 3 + i
+                    if offset < len(candidates):
+                        num = candidates[offset][0]
+                        top3_nums.append(num)
+                
+                # If not enough numbers, fill with random
+                while len(top3_nums) < 3:
+                    remaining = [n for n in range(1, 50) if n not in top3_nums]
+                    if remaining:
+                        top3_nums.append(random.choice(remaining))
+            
+            # Sort the 3 numbers
+            top3_nums = sorted(top3_nums)
+            
+            # Calculate average confidence for this group
+            group_confidence = sum(number_scores[num]['total_score'] for num in top3_nums) / 3
+            
+            # Build analysis details
+            analysis = {
+                'numbers': top3_nums,
+                'confidence': group_confidence,
+                'individual_scores': {num: number_scores[num]['total_score'] for num in top3_nums},
+                'period': dynamic_period
+            }
+            
+            result_groups.append((top3_nums, analysis))
+        
+        random.seed()
+        return result_groups
+    
+    def _calculate_number_score_18d(self, history: List[Dict], number: int, period: int, expect: str) -> Dict:
+        """
+        Calculate comprehensive 18-dimensional score for a single number
+        针对49个号码的18维度分析
+        """
+        scores = {}
+        weights = {}
+        
+        # Basic Statistics (30%)
+        scores['long_term_missing'] = self._score_number_long_term_missing(history, number, period)
+        weights['long_term_missing'] = 0.08
+        
+        scores['short_term_hot'] = self._score_number_short_term_hot(history, number)
+        weights['short_term_hot'] = 0.07
+        
+        scores['cycle_pattern'] = self._score_number_cycle_pattern(history, number, period)
+        weights['cycle_pattern'] = 0.08
+        
+        scores['consecutive_penalty'] = self._score_number_consecutive_penalty(history, number)
+        weights['consecutive_penalty'] = 0.07
+        
+        # Advanced Mathematics (25%)
+        scores['markov_chain'] = self._score_number_markov(history, number)
+        weights['markov_chain'] = 0.10
+        
+        scores['fourier_period'] = self._score_number_fourier(history, number)
+        weights['fourier_period'] = 0.08
+        
+        scores['bayesian_probability'] = self._score_number_bayesian(history, number)
+        weights['bayesian_probability'] = 0.07
+        
+        # Number Properties (20%)
+        scores['number_hot_cold'] = self._score_number_temperature(history, number)
+        weights['number_hot_cold'] = 0.05
+        
+        scores['tail_trend'] = self._score_number_tail(history, number)
+        weights['tail_trend'] = 0.05
+        
+        scores['big_small'] = self._score_number_big_small(history, number)
+        weights['big_small'] = 0.05
+        
+        scores['odd_even'] = self._score_number_odd_even(history, number)
+        weights['odd_even'] = 0.05
+        
+        # Metaphysical Patterns (15%)
+        scores['zodiac_relation'] = self._score_number_zodiac_relation(history, number)
+        weights['zodiac_relation'] = 0.05
+        
+        scores['five_elements'] = self._score_number_five_elements(history, number)
+        weights['five_elements'] = 0.05
+        
+        scores['color_wave'] = self._score_number_color_wave(history, number)
+        weights['color_wave'] = 0.05
+        
+        # Validation & Correction (10%)
+        scores['monte_carlo'] = self._score_number_monte_carlo(history, number)
+        weights['monte_carlo'] = 0.05
+        
+        scores['repeat_penalty'] = self._score_number_repeat_penalty(history, number)
+        weights['repeat_penalty'] = 0.03
+        
+        scores['prime_composite'] = self._score_number_prime_composite(history, number)
+        weights['prime_composite'] = 0.02
+        
+        # Calculate weighted total score
+        total_score = sum(scores[key] * weights[key] for key in scores if key in weights)
+        
+        # Add random perturbation (±5 points) for variation
+        total_score += random.uniform(-5, 5)
+        
+        return {
+            'total_score': total_score,
+            'dimension_scores': scores,
+            'weights': weights
+        }
+    
+    # Number-specific scoring methods for 3in3 prediction
+    
+    def _score_number_long_term_missing(self, history: List[Dict], number: int, period: int) -> float:
+        """长期遗漏分析 - 号码遗漏期数"""
+        missing = 0
+        for record in history:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                if number in open_code:
+                    break
+                missing += 1
+        
+        # 遗漏越长，分数越高
+        if missing > period * 0.3:
+            return 90.0
+        elif missing > period * 0.2:
+            return 75.0
+        elif missing > period * 0.1:
+            return 60.0
+        else:
+            return 40.0
+    
+    def _score_number_short_term_hot(self, history: List[Dict], number: int) -> float:
+        """短期热度分析 - 号码近20期出现"""
+        count = 0
+        for record in history[:20]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                count += 1
+        
+        # 近期出现越多，分数越高
+        return min(100, 40 + count * 5)
+    
+    def _score_number_cycle_pattern(self, history: List[Dict], number: int, period: int) -> float:
+        """周期规律分析 - 号码平均间隔"""
+        appearances = []
+        for idx, record in enumerate(history):
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                appearances.append(idx)
+        
+        if len(appearances) < 2:
+            return 50.0
+        
+        # 计算平均间隔
+        intervals = [appearances[i] - appearances[i+1] for i in range(len(appearances)-1)]
+        avg_interval = sum(intervals) / len(intervals) if intervals else period
+        
+        # 如果接近平均周期，分数更高
+        current_missing = appearances[0] if appearances else period
+        deviation = abs(current_missing - avg_interval) / avg_interval if avg_interval > 0 else 1
+        
+        return max(30, 100 - deviation * 50)
+    
+    def _score_number_consecutive_penalty(self, history: List[Dict], number: int) -> float:
+        """连开惩罚 - 上期号码降权"""
+        if history:
+            last_code = history[0].get('open_code', [])
+            if isinstance(last_code, list) and number in last_code:
+                return 20.0  # Heavy penalty for consecutive
+        return 70.0
+    
+    def _score_number_markov(self, history: List[Dict], number: int) -> float:
+        """马尔可夫链 - 号码转移概率"""
+        if not history:
+            return 50.0
+        
+        # Build transition matrix for numbers
+        transitions = defaultdict(lambda: defaultdict(int))
+        
+        for i in range(len(history) - 1):
+            curr_code = history[i].get('open_code', [])
+            next_code = history[i+1].get('open_code', [])
+            
+            if isinstance(curr_code, list) and isinstance(next_code, list):
+                for curr_num in curr_code:
+                    for next_num in next_code:
+                        transitions[curr_num][next_num] += 1
+        
+        # Check transition probability from last period
+        last_code = history[0].get('open_code', [])
+        if isinstance(last_code, list):
+            total_transitions = 0
+            target_transitions = 0
+            
+            for last_num in last_code:
+                total_transitions += sum(transitions[last_num].values())
+                target_transitions += transitions[last_num][number]
+            
+            if total_transitions > 0:
+                prob = target_transitions / total_transitions
+                return min(100, 30 + prob * 700)
+        
+        return 50.0
+    
+    def _score_number_fourier(self, history: List[Dict], number: int) -> float:
+        """傅里叶周期 - 号码周期检测"""
+        # Simple periodic pattern detection
+        appearances = []
+        for idx, record in enumerate(history[:100]):
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                appearances.append(idx)
+        
+        if len(appearances) < 3:
+            return 50.0
+        
+        # Check for periodic patterns
+        intervals = [appearances[i] - appearances[i+1] for i in range(len(appearances)-1)]
+        if len(set(intervals)) <= 2:  # Very regular pattern
+            return 85.0
+        elif len(set(intervals)) <= 4:  # Somewhat regular
+            return 65.0
+        else:
+            return 45.0
+    
+    def _score_number_bayesian(self, history: List[Dict], number: int) -> float:
+        """贝叶斯概率 - 多条件后验"""
+        if not history:
+            return 50.0
+        
+        # Prior: overall appearance rate
+        total_appearances = 0
+        total_draws = len(history)
+        
+        for record in history:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                total_appearances += 1
+        
+        prior = total_appearances / total_draws if total_draws > 0 else 0.1
+        
+        # Likelihood: recent 10 periods
+        recent_appearances = 0
+        for record in history[:10]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                recent_appearances += 1
+        
+        likelihood = (recent_appearances + 1) / 11  # Smoothing
+        
+        # Posterior probability
+        posterior = (likelihood * prior) / (likelihood * prior + (1 - likelihood) * (1 - prior))
+        
+        return min(100, 20 + posterior * 160)
+    
+    def _score_number_temperature(self, history: List[Dict], number: int) -> float:
+        """号码冷热 - 直接分析号码温度"""
+        count = 0
+        for record in history[:30]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                count += 1
+        
+        # Temperature based on frequency
+        if count >= 5:
+            return 80.0  # Hot
+        elif count >= 2:
+            return 60.0  # Warm
+        else:
+            return 70.0  # Cold (paradoxically good for prediction)
+    
+    def _score_number_tail(self, history: List[Dict], number: int) -> float:
+        """尾数走势 - 号码尾数规律"""
+        tail = number % 10
+        
+        # Count tail appearances in recent draws
+        tail_count = 0
+        for record in history[:20]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if num % 10 == tail:
+                        tail_count += 1
+        
+        # Balance: not too much, not too little
+        ideal_count = 7 * 2  # 7 numbers per draw * 20 draws / 10 tails
+        deviation = abs(tail_count - ideal_count)
+        
+        return max(30, 100 - deviation * 3)
+    
+    def _score_number_big_small(self, history: List[Dict], number: int) -> float:
+        """大小分析 - 号码大小（>24为大）"""
+        is_big = number > 24
+        
+        # Count big/small balance in recent draws
+        big_count = 0
+        small_count = 0
+        
+        for record in history[:10]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if num > 24:
+                        big_count += 1
+                    else:
+                        small_count += 1
+        
+        # Favor the less frequent category
+        if is_big and small_count > big_count:
+            return 75.0
+        elif not is_big and big_count > small_count:
+            return 75.0
+        else:
+            return 55.0
+    
+    def _score_number_odd_even(self, history: List[Dict], number: int) -> float:
+        """单双分析 - 号码单双"""
+        is_odd = number % 2 == 1
+        
+        # Count odd/even balance
+        odd_count = 0
+        even_count = 0
+        
+        for record in history[:10]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if num % 2 == 1:
+                        odd_count += 1
+                    else:
+                        even_count += 1
+        
+        # Favor the less frequent category
+        if is_odd and even_count > odd_count:
+            return 75.0
+        elif not is_odd and odd_count > even_count:
+            return 75.0
+        else:
+            return 55.0
+    
+    def _score_number_zodiac_relation(self, history: List[Dict], number: int) -> float:
+        """生肖关系 - 号码所属生肖的关系"""
+        zodiac = NUMBER_TO_ZODIAC.get(number)
+        if not zodiac:
+            return 50.0
+        
+        # Same logic as zodiac scoring
+        if not history:
+            return 50.0
+        
+        last_tema = history[0].get('tema', 0)
+        last_zodiac = NUMBER_TO_ZODIAC.get(last_tema, '')
+        
+        # Liu Chong (clash) - avoid
+        if ZODIAC_LIU_CHONG.get(last_zodiac) == zodiac:
+            return 30.0
+        
+        # San He (harmony) - favor
+        if zodiac in ZODIAC_SAN_HE.get(last_zodiac, []):
+            return 80.0
+        
+        # Liu He (harmony) - favor
+        if ZODIAC_LIU_HE.get(last_zodiac) == zodiac:
+            return 75.0
+        
+        return 55.0
+    
+    def _score_number_five_elements(self, history: List[Dict], number: int) -> float:
+        """五行分析 - 号码所属五行"""
+        # Simplified five elements mapping by number mod 5
+        elements = ['金', '木', '水', '火', '土']
+        element = elements[number % 5]
+        
+        # Count recent element distribution
+        element_count = defaultdict(int)
+        for record in history[:20]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    elem = elements[num % 5]
+                    element_count[elem] += 1
+        
+        # Favor less frequent elements
+        current_count = element_count[element]
+        avg_count = sum(element_count.values()) / 5 if element_count else 1
+        
+        if current_count < avg_count * 0.7:
+            return 75.0
+        elif current_count > avg_count * 1.3:
+            return 45.0
+        else:
+            return 60.0
+    
+    def _score_number_color_wave(self, history: List[Dict], number: int) -> float:
+        """波色分析 - 号码红蓝绿波"""
+        # Red: 1,2,7,8,12,13,18,19,23,24,29,30,34,35,40,45,46
+        # Blue: 3,4,9,10,14,15,20,25,26,31,36,37,41,42,47,48
+        # Green: 5,6,11,16,17,21,22,27,28,32,33,38,39,43,44,49
+        
+        red_nums = {1,2,7,8,12,13,18,19,23,24,29,30,34,35,40,45,46}
+        blue_nums = {3,4,9,10,14,15,20,25,26,31,36,37,41,42,47,48}
+        
+        if number in red_nums:
+            color = 'red'
+        elif number in blue_nums:
+            color = 'blue'
+        else:
+            color = 'green'
+        
+        # Count color distribution
+        color_count = defaultdict(int)
+        for record in history[:15]:
+            tema = record.get('tema', 0)
+            if tema in red_nums:
+                color_count['red'] += 1
+            elif tema in blue_nums:
+                color_count['blue'] += 1
+            else:
+                color_count['green'] += 1
+        
+        # Favor less frequent colors
+        current_count = color_count[color]
+        avg_count = sum(color_count.values()) / 3 if color_count else 1
+        
+        if current_count < avg_count * 0.7:
+            return 75.0
+        elif current_count > avg_count * 1.3:
+            return 45.0
+        else:
+            return 60.0
+    
+    def _score_number_monte_carlo(self, history: List[Dict], number: int) -> float:
+        """蒙特卡洛验证 - 号码模拟"""
+        if not NUMPY_AVAILABLE or not history:
+            return 55.0
+        
+        # Simple simulation: check if number would appear in random sampling
+        appearances = sum(1 for record in history[:50] 
+                         for num in record.get('open_code', []) if num == number)
+        
+        prob = appearances / 50 if history else 0.1
+        simulated_score = 40 + prob * 100
+        
+        return min(100, simulated_score)
+    
+    def _score_number_repeat_penalty(self, history: List[Dict], number: int) -> float:
+        """重复惩罚 - 避免重复预测号码"""
+        # Check if number appeared in last 2 draws
+        repeat_count = 0
+        for record in history[:2]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list) and number in open_code:
+                repeat_count += 1
+        
+        if repeat_count >= 2:
+            return 25.0  # Heavy penalty
+        elif repeat_count == 1:
+            return 50.0
+        else:
+            return 80.0
+    
+    def _score_number_prime_composite(self, history: List[Dict], number: int) -> float:
+        """质合分析 - 号码质数/合数"""
+        def is_prime(n):
+            if n < 2:
+                return False
+            for i in range(2, int(n ** 0.5) + 1):
+                if n % i == 0:
+                    return False
+            return True
+        
+        is_prime_num = is_prime(number)
+        
+        # Count prime/composite balance
+        prime_count = 0
+        composite_count = 0
+        
+        for record in history[:15]:
+            tema = record.get('tema', 0)
+            if is_prime(tema):
+                prime_count += 1
+            else:
+                composite_count += 1
+        
+        # Favor opposite trend
+        if is_prime_num and composite_count > prime_count:
+            return 70.0
+        elif not is_prime_num and prime_count > composite_count:
+            return 70.0
+        else:
+            return 55.0
