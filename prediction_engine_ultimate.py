@@ -964,14 +964,10 @@ class PredictionEngineUltimate:
         scores['prime_composite'] = self._score_number_prime_composite(history, number)
         weights['prime_composite'] = 0.02
         
-        # Random perturbation
-        scores['random_perturbation'] = random.uniform(40, 60)
-        weights['random_perturbation'] = 0.00  # No weight, just for variation
-        
         # Calculate weighted total score
         total_score = sum(scores[key] * weights[key] for key in scores if key in weights)
         
-        # Add random perturbation (±5 points)
+        # Add random perturbation (±5 points) for variation
         total_score += random.uniform(-5, 5)
         
         return {
