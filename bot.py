@@ -14,6 +14,9 @@ import random
 from datetime import datetime, timedelta, time
 from typing import List, Dict, Tuple, Optional
 from collections import Counter, defaultdict
+from PIL import Image, ImageDraw, ImageFont
+from tupian import ResultImageGenerator
+from xuanji_scraper import XuanjiImageScraper
 import asyncio
 
 import requests
@@ -42,7 +45,9 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "5"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "lottery.db")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")
 LOTTERY_TIME = os.getenv("LOTTERY_TIME", "21:32:32")
-
+# 管理员白名单
+ADMIN_USER_IDS = os.getenv('ADMIN_USER_IDS', '').split(',')
+ADMIN_USER_IDS = [int(uid.strip()) for uid in ADMIN_USER_IDS if uid.strip().isdigit()]
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +93,28 @@ NUMBER_TO_ZODIAC = {}
 for zodiac, numbers in ZODIAC_NUMBERS.items():
     for num in numbers:
         NUMBER_TO_ZODIAC[num] = zodiac
+
+# 权限检查装饰器
+def admin_only(func):
+    """装饰器：仅管理员可用"""
+    async def wrapper(self, update, *args, **kwargs):
+        user_id = None
+        
+        # 获取用户 ID
+        if hasattr(update, 'message') and update.message:
+            user_id = update.message.from_user.id
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            user_id = update.callback_query.from_user.id
+        
+        # 检查是否是管理员
+        if user_id and user_id not in ADMIN_USER_IDS:
+            logger.warning(f"⚠️ 未授权访问: User {user_id}")
+            if hasattr(update, 'message') and update.message:
+                await update.message.reply_text("⚠️ 此机器人仅限授权用户使用")
+            return
+        
+        return await func(self, update, *args, **kwargs)
+    return wrapper
 
 
 class DatabaseHandler:
@@ -213,7 +240,10 @@ class DatabaseHandler:
         if row:
             return {
                 'expect': row['expect'],
-                'open_code': json.loads(row['open_code']),
+            'open_code': (
+                json.loads(row['open_code']) if row['open_code'].strip().startswith('[') 
+                else [int(x.strip()) for x in row['open_code'].split(',')]
+            ),
                 'tema': row['tema'],
                 'tema_zodiac': row['tema_zodiac'],
                 'open_time': row['open_time']
@@ -232,7 +262,7 @@ class DatabaseHandler:
         for row in rows:
             results.append({
                 'expect': row['expect'],
-                'open_code': json.loads(row['open_code']),
+            'open_code': json.loads(row['open_code']) if row['open_code'].startswith('[') else [int(x) for x in row['open_code'].split(',')],
                 'tema': row['tema'],
                 'tema_zodiac': row['tema_zodiac'],
                 'open_time': row['open_time']
@@ -315,6 +345,41 @@ class DatabaseHandler:
         ''', (expect, json.dumps(predicted_top5), actual_tema, is_hit, hit_rank))
         conn.commit()
         conn.close()
+    def get_result_by_expect(self, expect: str) -> Optional[Dict]:
+        """Get lottery result by expect number"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # 规范化期号（支持 '038' 或 '2026038' 格式）
+        if len(expect) == 3:
+            # 如果是3位数，需要匹配后3位
+            cursor.execute("""
+                SELECT expect, open_code, tema, tema_zodiac, open_time 
+                FROM lottery_history 
+                WHERE expect LIKE ?
+                ORDER BY expect DESC
+                LIMIT 1
+            """, (f'%{expect}',))
+        else:
+            # 完整期号直接查询
+            cursor.execute("""
+                SELECT expect, open_code, tema, tema_zodiac, open_time 
+                FROM lottery_history 
+                WHERE expect = ?
+            """, (expect,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'expect': row['expect'],
+                'open_code': json.loads(row['open_code']),  # 这里是 JSON 字符串
+                'tema': row['tema'],
+                'tema_zodiac': row['tema_zodiac'],
+                'open_time': row['open_time']
+            }
+        return None
     
     def get_all_notify_users(self) -> List[int]:
         """Get all users with notifications enabled"""
@@ -501,6 +566,155 @@ class DatabaseHandler:
             'recent_5_rate': (recent_5_hits / recent_5_total * 100) if recent_5_total > 0 else 0
         }
 
+    
+    def can_predict_3in3(self, user_id: int, expect: str, num_groups: int) -> bool:
+        """Check if user can predict 3in3 for this period and group count"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT COUNT(*) as count 
+            FROM predictions_3in3 
+            WHERE user_id = ? AND expect = ? AND num_groups = ?
+        ''', (user_id, expect, num_groups))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result['count'] == 0
+    
+    def save_3in3_prediction(self, user_id: int, expect: str, num_groups: int, predictions: list):
+        """Save 3in3 prediction to database"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Convert predictions to JSON string
+        predictions_json = json.dumps(predictions)
+        
+        try:
+            cursor.execute('''
+                INSERT INTO predictions_3in3 (user_id, expect, num_groups, predictions)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, expect, num_groups, predictions_json))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            conn.close()
+            return False
+    
+    def get_3in3_prediction(self, user_id: int, expect: str, num_groups: int) -> Optional[Dict]:
+        """Get 3in3 prediction record"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM predictions_3in3 
+            WHERE user_id = ? AND expect = ? AND num_groups = ?
+        ''', (user_id, expect, num_groups))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return dict(result)
+        return None
+    
+    def check_3in3_results(self, expect: str):
+        """Check 3in3 predictions against actual results"""
+        # Get actual result
+        result = self.get_result_by_expect(expect)
+        if not result:
+            return
+        
+        actual_balls = result['open_code'][:7]  # First 7 balls
+        actual_balls_str = json.dumps(actual_balls)
+        
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Get all unchecked predictions for this period
+        cursor.execute('''
+            SELECT * FROM predictions_3in3 
+            WHERE expect = ? AND is_checked = 0
+        ''', (expect,))
+        
+        predictions = cursor.fetchall()
+        
+        for pred in predictions:
+            pred_list = json.loads(pred['predictions'])
+            hit_results = []
+            
+            # Check each group
+            for group in pred_list:
+                predicted_numbers = group[0]  # (numbers, scores)
+                hit_count = sum(1 for num in predicted_numbers if num in actual_balls)
+                hit_results.append({
+                    'numbers': predicted_numbers,
+                    'hit_count': hit_count,
+                    'is_3in3': hit_count == 3
+                })
+            
+            hit_results_json = json.dumps(hit_results)
+            
+            # Update record
+            cursor.execute('''
+                UPDATE predictions_3in3 
+                SET actual_balls = ?, hit_results = ?, is_checked = 1
+                WHERE id = ?
+            ''', (actual_balls_str, hit_results_json, pred['id']))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_3in3_hit_stats(self, user_id: int, num_groups: int) -> Dict:
+        """Calculate 3in3 hit rate statistics for specific group count"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM predictions_3in3 
+            WHERE user_id = ? AND num_groups = ? AND is_checked = 1
+            ORDER BY expect DESC
+        ''', (user_id, num_groups))
+        
+        records = cursor.fetchall()
+        conn.close()
+        
+        if not records:
+            return {
+                'total': 0,
+                'hit_3in3': 0,
+                'hit_rate': 0,
+                'recent_5': {'total': 0, 'hits': 0, 'rate': 0}
+            }
+        
+        total = len(records)
+        hit_3in3 = 0
+        recent_5_hits = 0
+        
+        for idx, record in enumerate(records):
+            if record['hit_results']:
+                hit_results = json.loads(record['hit_results'])
+                # Check if any group got 3in3
+                if any(r['is_3in3'] for r in hit_results):
+                    hit_3in3 += 1
+                    if idx < 5:
+                        recent_5_hits += 1
+        
+        recent_5_total = min(5, total)
+        
+        return {
+            'total': total,
+            'hit_3in3': hit_3in3,
+            'hit_rate': (hit_3in3 / total * 100) if total > 0 else 0,
+            'recent_5': {
+                'total': recent_5_total,
+                'hits': recent_5_hits,
+                'rate': (recent_5_hits / recent_5_total * 100) if recent_5_total > 0 else 0
+            }
+        }
 
 class APIHandler:
     """Handle API calls to lottery service"""
@@ -908,7 +1122,7 @@ class PredictionEngine:
         
         return top5, scores
     
-    def predict_top2_zodiac(self, period: int = 100) -> Dict:
+    def predict_top2_zodiac(self, period: int = 100, expect: str = None) -> Dict:
         """
         Predict TOP 2 most likely zodiacs based on multi-dimensional analysis
         
@@ -920,7 +1134,19 @@ class PredictionEngine:
         
         Returns: TOP 2 zodiacs with detailed analysis data
         """
-        history = self.db.get_history(period)
+        # Dynamic history range based on expect number
+        if expect:
+            period_num = int(expect[-3:])  # 取期号后3位
+            ranges = {0: 300, 1: 200, 2: 100, 3: 50, 4: 30}
+            dynamic_period = ranges[period_num % 5]
+            
+            # Use expect + period as random seed
+            random.seed(int(expect) * 1000 + dynamic_period)
+        else:
+            dynamic_period = period
+            random.seed(int(datetime.now().timestamp()))
+        
+        history = self.db.get_history(dynamic_period)
         
         if not history:
             # Random selection if no history
@@ -941,17 +1167,20 @@ class PredictionEngine:
         all_zodiacs = list(ZODIAC_NUMBERS.keys())
         
         for zodiac in all_zodiacs:
-            freq_score = self._calculate_frequency_score(history, zodiac, period)
+            freq_score = self._calculate_frequency_score(history, zodiac, dynamic_period)
             missing_score = self._calculate_missing_score(history, zodiac)
-            cycle_score = self._calculate_cycle_score(history, zodiac, period)
+            cycle_score = self._calculate_cycle_score(history, zodiac, dynamic_period)
             trend_score = self._calculate_trend_score(history, zodiac)
+            
+            # Add small random factor for variation (±5)
+            random_factor = random.uniform(-5, 5)
             
             final_score = (
                 freq_score * 0.30 +
                 missing_score * 0.30 +
                 cycle_score * 0.20 +
                 trend_score * 0.20
-            )
+            ) + random_factor
             
             zodiac_scores[zodiac] = {
                 'score': final_score,
@@ -967,6 +1196,9 @@ class PredictionEngine:
         
         zodiac1, analysis1 = top2[0]
         zodiac2, analysis2 = top2[1]
+        
+        # Reset random seed
+        random.seed()
         
         return {
             'zodiac1': zodiac1,
@@ -1143,6 +1375,147 @@ class PredictionEngine:
         
         return {'missing': missing[:15]}
 
+    def predict_3in3(self, num_groups: int = 1, expect: str = None) -> List[Tuple[List[int], Dict]]:
+        """
+        3中3预测 - 预测七色球中可能出现的3个号码
+        
+        Args:
+            num_groups: 预测组数（1/3/5/10）
+        
+        Returns:
+            [(号码组1, 评分1), (号码组2, 评分2), ...]
+        """
+        # Dynamic history range based on expect number
+        if expect:
+            period_num = int(expect[-3:])  # 取期号后3位
+            ranges = {0: 300, 1: 200, 2: 100, 3: 50, 4: 30}
+            dynamic_period = ranges[period_num % 5]
+            
+            # Use expect + num_groups as random seed
+            seed_value = int(expect) * 100 + num_groups
+            random.seed(seed_value)
+        else:
+            dynamic_period = 100
+            random.seed(int(datetime.now().timestamp()))
+        
+        history = self.db.get_history(dynamic_period)
+        
+        if not history:
+            # 无历史数据时随机生成
+            result_groups = []
+            for _ in range(num_groups):
+                top3 = sorted(random.sample(range(1, 50), 3))
+                scores = {top3[0]: 50.0, top3[1]: 50.0, top3[2]: 50.0}
+                result_groups.append((top3, scores))
+            return result_groups
+        
+        # 统计每个号码在七色球中的出现频率
+        all_scores = defaultdict(float)
+        
+        # 因子1：七色球历史频率（40%权重）
+        # 统计最近100期，每个号码在七色球中出现的次数
+        for record in history[:100]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if 1 <= num <= 49:
+                        all_scores[num] += 0.4
+        
+        # 因子2：七色球遗漏分析（30%权重）
+        # 最近20期没在七色球中出现的号码，加分
+        recent_balls = set()
+        for record in history[:20]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if 1 <= num <= 49:
+                        recent_balls.add(num)
+        
+        for num in range(1, 50):
+            if num not in recent_balls:
+                all_scores[num] += 30
+            else:
+                # 计算最近一次出现的位置
+                for idx, record in enumerate(history[:20]):
+                    open_code = record.get('open_code', [])
+                    if isinstance(open_code, list) and num in open_code:
+                        all_scores[num] += (idx / 20) * 30
+                        break
+        
+        # 因子3：生肖均衡（30%权重）
+        # 七色球通常会分布不同生肖
+        zodiac_list = []
+        for record in history[:30]:
+            open_code = record.get('open_code', [])
+            if isinstance(open_code, list):
+                for num in open_code:
+                    if 1 <= num <= 49:
+                        zodiac = NUMBER_TO_ZODIAC.get(num)
+                        if zodiac:
+                            zodiac_list.append(zodiac)
+        
+        zodiac_counter = Counter(zodiac_list)
+        expected_zodiac = len(zodiac_list) / 12 if zodiac_list else 1
+        
+        for num in range(1, 50):
+            zodiac = NUMBER_TO_ZODIAC.get(num)
+            if zodiac:
+                freq = zodiac_counter.get(zodiac, 0)
+                if freq < expected_zodiac:
+                    all_scores[num] += 30
+                else:
+                    score = max(0, (expected_zodiac - freq) / expected_zodiac * 30)
+                    all_scores[num] += score
+        
+        # Add small random factor for variation (±5 for each number)
+        for num in range(1, 50):
+            all_scores[num] += random.uniform(-5, 5)
+        
+        # 排序得到候选号码
+        sorted_nums = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 生成多组预测
+        result_groups = []
+        
+        for group_idx in range(num_groups):
+            if num_groups == 1:
+                # 1组：直接取TOP3
+                top3 = [num for num, _ in sorted_nums[:3]]
+            else:
+                # 多组：错开选择，保证多样性
+                candidates = sorted_nums[:min(30, len(sorted_nums))]
+                selected = []
+                
+                # 选择3个号码
+                for i in range(3):
+                    offset = group_idx * 3 + i
+                    if offset < len(candidates):
+                        num = candidates[offset][0]
+                        selected.append(num)
+                
+                # 如果不够3个，随机补充
+                while len(selected) < 3:
+                    remaining = [n for n, _ in candidates if n not in selected]
+                    if remaining:
+                        selected.append(random.choice(remaining))
+                    else:
+                        selected.append(random.randint(1, 49))
+                
+                top3 = sorted(selected)
+            
+            # 计算评分（显示用）
+            scores = {
+                top3[0]: 95.0 - group_idx * 5,
+                top3[1]: 85.0 - group_idx * 5,
+                top3[2]: 75.0 - group_idx * 5
+            }
+            
+            result_groups.append((top3, scores))
+        
+        # Reset random seed
+        random.seed()
+        
+        return result_groups
 
 class LotteryBot:
     """Main Telegram bot handler"""
@@ -1174,7 +1547,7 @@ class LotteryBot:
         minutes, seconds = divmod(remainder, 60)
         
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    
+    @admin_only
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
         user = update.effective_user
@@ -1216,7 +1589,7 @@ class LotteryBot:
             
             # 格式化七色球（去掉方括号）
             if isinstance(open_code, list):
-                balls_str = ', '.join([f"{num:02d}" for num in open_code])
+                balls_str = ', '.join([f"{str(int(num)).zfill(2)}" for num in open_code])
             else:
                 balls_str = str(open_code).strip('[]')
             
@@ -1224,7 +1597,7 @@ class LotteryBot:
 ➖➖➖➖➖➖➖
 📊 <b>最新开奖（{expect}期）</b>
 
-🎯 <b>特码：{tema:02d}    {zodiac_emoji}{zodiac}</b>
+🎯 <b>特码：{str(int(tema)).zfill(2)}    {zodiac_emoji}{zodiac}</b>
 🎲 <b>七色球：{balls_str}</b>
 📅 <b>时间：{time_str}</b>
 ➖➖➖➖➖➖➖
@@ -1247,6 +1620,9 @@ class LotteryBot:
                 InlineKeyboardButton("📜 历史记录", callback_data="menu_history"),
             ],
             [
+                InlineKeyboardButton("🔮 玄机预测图", callback_data="xuanji_menu"),
+            ],
+            [
                 InlineKeyboardButton("⚙️ 个人设置", callback_data="menu_settings"),
                 InlineKeyboardButton("❓ 帮助", callback_data="help"),
             ],
@@ -1255,6 +1631,7 @@ class LotteryBot:
         
         await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='HTML')
     
+    @admin_only
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks"""
         query = update.callback_query
@@ -1275,11 +1652,30 @@ class LotteryBot:
             await self.back_to_main(query)
         
         # Prediction handlers
+        elif data == "predict_3in3":
+            await self.show_3in3_groups_menu(query)
+        elif data.startswith("3in3_groups_"):
+            num_groups = int(data.replace("3in3_groups_", ""))
+            await self.show_3in3_prediction(query, num_groups)
+        elif data == "3in3_history":
+            await self.show_3in3_history(query)
         elif data.startswith("predict_"):
             method = data.replace("predict_", "")
             await self.show_prediction(query, method)
         elif data == "ai_zodiac_predict":
             await self.show_ai_zodiac_predict(query)
+        elif data == "xuanji_menu":
+            await self.show_xuanji_menu(query)
+        elif data.startswith("xuanji_select_"):
+            # 选择图片类型后，显示期数菜单
+            image_type = data.replace("xuanji_select_", "")
+            await self.show_xuanji_period_menu(query, image_type)
+        elif data.startswith("xuanji_"):
+            # 格式：xuanji_huofenghuang_2026038
+            parts = data.replace("xuanji_", "").split("_")
+            if len(parts) == 2:
+                image_type, expect = parts
+                await self.show_xuanji_image(query, image_type, expect)
         elif data == "do_zodiac_prediction":
             await self.perform_zodiac_prediction(query)
         elif data == "prediction_history":
@@ -1356,6 +1752,7 @@ class LotteryBot:
         
         keyboard = [
             [InlineKeyboardButton("🔮 AI 生肖预测（TOP 2）⭐", callback_data="ai_zodiac_predict")],
+            [InlineKeyboardButton("🎲 三中三预测", callback_data="predict_3in3")],
             [
                 InlineKeyboardButton("🤖 综合预测", callback_data="predict_comprehensive"),
                 InlineKeyboardButton("🐲 生肖预测", callback_data="predict_zodiac"),
@@ -1365,7 +1762,7 @@ class LotteryBot:
                 InlineKeyboardButton("❄️ 冷号预测", callback_data="predict_cold"),
             ],
             [InlineKeyboardButton("📊 预测历史", callback_data="prediction_history")],
-            [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")],
+            [InlineKeyboardButton("🔙 返主菜单", callback_data="back_to_main")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1403,7 +1800,7 @@ class LotteryBot:
             zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             score = scores.get(num, 0)
             bar = "█" * int(score / 10)
-            message += f"{idx}. 号码 <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {score:.1f}%\n"
+            message += f"{idx}. 号码 <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac} - {score:.1f}%\n"
             message += f"   {bar}\n\n"
         
         countdown = self.get_countdown()
@@ -1469,7 +1866,7 @@ class LotteryBot:
 ✅ 生肖周期分析（20%权重）
 ✅ 生肖趋势分析（20%权重）
 
-分析期数：最近100期历史数据
+分析期数：根据期号动态调整（30-300期）
 
 ➖➖➖➖➖➖➖
 """
@@ -1499,11 +1896,16 @@ class LotteryBot:
             await self.show_existing_zodiac_prediction(query, next_expect)
             return
         
+        # Calculate dynamic period based on expect
+        period_num = int(next_expect[-3:])
+        ranges = {0: 300, 1: 200, 2: 100, 3: 50, 4: 30}
+        dynamic_period = ranges[period_num % 5]
+        
         # Show progress animation
-        progress_msg = """
+        progress_msg = f"""
 ⏳ <b>AI 正在分析历史数据...</b>
 
-✅ 加载最近100期历史数据...
+✅ 加载最近{dynamic_period}期历史数据...
 """
         await query.edit_message_text(progress_msg, parse_mode='HTML')
         await asyncio.sleep(0.5)
@@ -1528,8 +1930,8 @@ class LotteryBot:
         await query.edit_message_text(progress_msg, parse_mode='HTML')
         await asyncio.sleep(1)
         
-        # Perform prediction
-        prediction = self.predictor.predict_top2_zodiac(100)
+        # Perform prediction with expect seed for variation
+        prediction = self.predictor.predict_top2_zodiac(100, next_expect)
         
         # Save to database
         self.db.save_zodiac_prediction(
@@ -1544,9 +1946,9 @@ class LotteryBot:
         )
         
         # Show prediction result
-        await self.display_zodiac_prediction(query, next_expect, prediction)
+        await self.display_zodiac_prediction(query, next_expect, prediction, dynamic_period)
     
-    async def display_zodiac_prediction(self, query, expect: str, prediction: Dict):
+    async def display_zodiac_prediction(self, query, expect: str, prediction: Dict, dynamic_period: int = 100):
         """Display zodiac prediction result"""
         countdown = self.get_countdown()
         
@@ -1555,8 +1957,8 @@ class LotteryBot:
         emoji1 = ZODIAC_EMOJI.get(zodiac1, '')
         emoji2 = ZODIAC_EMOJI.get(zodiac2, '')
         
-        numbers1_str = ', '.join(f"{n:02d}" for n in prediction['numbers1'])
-        numbers2_str = ', '.join(f"{n:02d}" for n in prediction['numbers2'])
+        numbers1_str = ', '.join(f"{str(int(n)).zfill(2)}" for n in prediction['numbers1'])
+        numbers2_str = ', '.join(f"{str(int(n)).zfill(2)}" for n in prediction['numbers2'])
         
         score1 = prediction['score1']
         score2 = prediction['score2']
@@ -1579,7 +1981,7 @@ class LotteryBot:
 ➖➖➖➖➖➖➖
 ⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
 📊 开奖倒计时：{countdown}
-📈 分析期数：100期
+📈 分析期数：{dynamic_period}期
 
 ➖➖➖➖➖➖➖
 🥇 <b>推荐生肖一：{emoji1} {zodiac1}</b>
@@ -1587,7 +1989,7 @@ class LotteryBot:
 📊 综合评分：{score1:.1f}/100 {stars1}
 
 🔍 <b>分析依据：</b>
-✅ 出现次数：{details1['count']}次/100期
+✅ 出现次数：{details1['count']}次/{dynamic_period}期
 ✅ 当前遗漏：{details1['current_missing']}期
 ✅ 最大遗漏：{details1['max_missing']}期
 ✅ 平均遗漏：{details1['avg_missing']:.1f}期
@@ -1601,7 +2003,7 @@ class LotteryBot:
 📊 综合评分：{score2:.1f}/100 {stars2}
 
 🔍 <b>分析依据：</b>
-✅ 出现次数：{details2['count']}次/100期
+✅ 出现次数：{details2['count']}次/{dynamic_period}期
 ✅ 当前遗漏：{details2['current_missing']}期
 ✅ 最大遗漏：{details2['max_missing']}期
 ✅ 平均遗漏：{details2['avg_missing']:.1f}期
@@ -1720,6 +2122,563 @@ class LotteryBot:
         keyboard = [
             [InlineKeyboardButton("📊 查看预测历史", callback_data="prediction_history")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    async def show_xuanji_menu(self, query):
+        """显示玄机图类型选择菜单"""
+        from xuanji_scraper import XuanjiImageScraper
+        
+        # 获取最新期号
+        latest = self.db.get_latest_result()
+        if latest:
+            current_expect = int(latest['expect'])
+            next_expect = current_expect + 1
+        else:
+            next_expect = "未知"
+        
+        countdown = self.get_countdown()
+        
+        message = f"""
+🔮 <b>玄机图查询</b>
+
+➖➖➖➖➖➖➖
+📅 最新期号：{next_expect}
+⏰ 开奖倒计时：{countdown}
+➖➖➖➖➖➖➖
+
+📊 <b>请选择玄机图类型：</b>
+
+💡 支持查看最新3期的玄机图
+"""
+        
+        # 获取可用的图片类型
+        types = XuanjiImageScraper.get_available_types()
+        
+        keyboard = []
+        
+        # 动态生成按钮
+        for key, info in types.items():
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{info['emoji']} {info['name']}",
+                    callback_data=f"xuanji_select_{key}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_xuanji_image(self, query, image_type, expect=None):
+        """显示指定类型的玄机图"""
+        # 立即显示加载提示
+        await query.answer("🔄 正在获取图片，请稍候...", show_alert=False)
+        
+        # 修改消息内容，显示加载中
+        loading_msg = f"""
+⏳ <b>正在获取玄机图...</b>
+
+🔄 正在下载图片
+🔄 请稍候片刻...
+"""
+        await query.edit_message_text(loading_msg, parse_mode='HTML')
+        
+        try:
+            from xuanji_scraper import XuanjiImageScraper
+            import os
+            
+            # 如果没有指定期数，获取下一期期号
+            if not expect:
+                latest = self.db.get_latest_result()
+                if latest:
+                    expect = str(int(latest['expect']) + 1)
+                else:
+                    await query.edit_message_text(
+                        "❌ 无法获取最新期号，请稍后再试",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="xuanji_menu")]])
+                    )
+                    return
+            
+            scraper = XuanjiImageScraper()
+            image_path, result_expect, type_name = scraper.get_image(image_type, expect)
+            
+            if image_path and os.path.exists(image_path):
+                emoji = XuanjiImageScraper.IMAGE_TYPES[image_type]['emoji']
+                
+                # 查询该期的开奖结果
+                period_result = self.db.get_result_by_expect(result_expect)
+                
+                # 构建 caption
+                caption = f"""{emoji} <b>{type_name}玄机图</b>
+
+📅 <b>期号：第 {result_expect} 期</b>
+"""
+                
+                # 如果该期已开奖，显示结果
+                if period_result and period_result.get('open_code'):
+                    import json
+                    # 处理 opencode 可能是字符串或列表
+                    if isinstance(period_result['open_code'], str):
+                        if ',' in period_result['open_code']:
+                            open_code_list = [int(x.strip()) for x in period_result['open_code'].split(',')]
+                        else:
+                            open_code_list = json.loads(period_result['open_code'])
+                    else:
+                        open_code_list = period_result['open_code']
+                    tema = period_result.get('tema')
+                    tema_zodiac = period_result.get('tema_zodiac', '')
+                    
+                    # 格式化号码
+                    main_numbers = [str(n).zfill(2) for n in open_code_list[:6]]
+                    special_number = str(tema).zfill(2) if tema else '?'
+                    
+                    caption += f"""
+➖➖➖➖➖➖➖
+🎯 <b>开奖结果</b>
+
+🔢 <b>号码：{' '.join(main_numbers)} +  {special_number}</b>
+"""
+                    
+                    # 添加生肖信息（如果有）
+                    if tema_zodiac:
+                        caption += f"🐾 <b>特码生肖：{ZODIAC_EMOJI.get(tema_zodiac, '')} {tema_zodiac}</b>\n"
+                else:
+                    caption += "\n⏰ <i>本期尚未开奖</i>\n"
+                
+                caption += """
+➖➖➖➖➖➖➖
+💡 <i>玄机图仅供参考，请理性对待</i>
+
+⚠️ 本机器人仅供娱乐和学习参考，不构成任何投注建议。"""
+                
+                # 先发送图片
+                sent_photo = await query.message.reply_photo(
+                    photo=open(image_path, 'rb'),
+                    caption=caption,
+                    parse_mode='HTML'
+                )
+                
+                # 删除临时文件
+                try:
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                except:
+                    pass
+                
+                # 删除加载消息
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                
+                # 在图片下方发送新的确认消息（这样按钮就在最下面）
+                if sent_photo:
+                    keyboard = [
+                        [InlineKeyboardButton("🔙 返回玄机图菜单", callback_data="xuanji_menu")],
+                        [InlineKeyboardButton("🏠 返回主菜单", callback_data="back_to_main")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.message.reply_text(
+                        f"✅ {type_name}玄机图已发送",
+                        reply_markup=reply_markup
+                    )
+            else:
+                await query.edit_message_text(
+                    f"❌ 获取{type_name}玄机图失败，请稍后再试\n\n可能原因：\n• 网络连接问题\n• 图片源暂时不可用\n• 该期图片尚未发布",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="xuanji_menu")]])
+                )
+                
+        except Exception as e:
+            logger.error(f"Error fetching xuanji image: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            await query.edit_message_text(
+                f"❌ 获取玄机图时发生错误\n\n错误信息：{str(e)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="xuanji_menu")]])
+            )
+    async def show_xuanji_period_menu(self, query, image_type):
+        """显示期数选择菜单"""
+        from xuanji_scraper import XuanjiImageScraper
+        
+        # 获取最近3期的期号
+        latest = self.db.get_latest_result()
+        if latest:
+            current_expect = int(latest['expect'])
+            # 下一期就是最新的玄机图期数
+            next_expect = current_expect + 1
+            periods = [
+                (str(next_expect), f"下一期 (第{next_expect}期)"),      # 038期 - 最新
+                (str(current_expect), f"最新期 (第{current_expect}期)"),  # 037期 - 已开奖
+                (str(current_expect - 1), f"上一期 (第{current_expect - 1}期)"),  # 036期 - 历史
+            ]
+        else:
+            await query.edit_message_text(
+                "❌ 无法获取期号信息",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="xuanji_menu")]])
+            )
+            return
+        
+        type_info = XuanjiImageScraper.IMAGE_TYPES.get(image_type, {})
+        type_name = type_info.get('name', '未知')
+        type_emoji = type_info.get('emoji', '🔮')
+        
+        message = f"""
+{type_emoji} <b>{type_name}玄机图</b>
+
+➖➖➖➖➖➖➖
+📊 <b>请选择期数：</b>
+
+💡 提示：最新期为即将开奖的期数
+"""
+        
+        keyboard = []
+        for expect, label in periods:
+            keyboard.append([
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"xuanji_{image_type}_{expect}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 返回玄机图菜单", callback_data="xuanji_menu")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+
+    async def show_3in3_groups_menu(self, query):
+        """Show 3in3 prediction groups selection menu"""
+        user_id = query.from_user.id
+        latest = self.db.get_latest_result()
+        if latest:
+            next_expect = str(int(latest['expect']) + 1)
+        else:
+            next_expect = "未知"
+        
+        countdown = self.get_countdown()
+        
+        # Check prediction status for each group count
+        can_predict_1 = self.db.can_predict_3in3(user_id, next_expect, 1)
+        can_predict_3 = self.db.can_predict_3in3(user_id, next_expect, 3)
+        can_predict_5 = self.db.can_predict_3in3(user_id, next_expect, 5)
+        can_predict_10 = self.db.can_predict_3in3(user_id, next_expect, 10)
+        
+        status_1 = "📝 可预测" if can_predict_1 else "✅ 已预测"
+        status_3 = "📝 可预测" if can_predict_3 else "✅ 已预测"
+        status_5 = "📝 可预测" if can_predict_5 else "✅ 已预测"
+        status_10 = "📝 可预测" if can_predict_10 else "✅ 已预测"
+        
+        message = f"""
+🎲 <b>3中3预测</b>
+
+➖➖➖➖➖➖➖
+📅 预测期号：{next_expect}
+⏰ 开奖倒计时：{countdown}
+➖➖➖➖➖➖➖
+
+🎯 <b>预测说明：</b>
+预测七色球（7个号码）中可能出现的3个号码
+
+➖➖➖➖➖➖➖
+📊 <b>请选择预测组数：</b>
+
+1组预测 - {status_1}
+3组预测 - {status_3}
+5组预测 - {status_5}
+10组预测 - {status_10}
+
+💡 每个组数独立预测，预测后锁定
+"""
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "1组预测" + ("" if can_predict_1 else " ✅"),
+                    callback_data="3in3_groups_1"
+                ),
+                InlineKeyboardButton(
+                    "3组预测" + ("" if can_predict_3 else " ✅"),
+                    callback_data="3in3_groups_3"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "5组预测" + ("" if can_predict_5 else " ✅"),
+                    callback_data="3in3_groups_5"
+                ),
+                InlineKeyboardButton(
+                    "10组预测" + ("" if can_predict_10 else " ✅"),
+                    callback_data="3in3_groups_10"
+                ),
+            ],
+            [InlineKeyboardButton("📊 查看历史统计", callback_data="3in3_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu_predict")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_3in3_prediction(self, query, num_groups: int):
+        """Show 3in3 prediction result"""
+        user_id = query.from_user.id
+        latest = self.db.get_latest_result()
+        if latest:
+            next_expect = str(int(latest['expect']) + 1)
+        else:
+            next_expect = "未知"
+        
+        # Check if already predicted
+        if not self.db.can_predict_3in3(user_id, next_expect, num_groups):
+            # Show existing prediction
+            await self.show_existing_3in3_prediction(query, user_id, next_expect, num_groups)
+            return
+        
+        countdown = self.get_countdown()
+        
+        # Get predictions
+        predictions = self.predictor.predict_3in3(num_groups, next_expect)
+        
+        # Save to database
+        self.db.save_3in3_prediction(user_id, next_expect, num_groups, predictions)
+        
+        # Save to database
+        self.db.save_3in3_prediction(user_id, next_expect, num_groups, predictions)
+        
+        # Calculate dynamic period for display
+        period_num = int(next_expect[-3:])
+        ranges = {0: 300, 1: 200, 2: 100, 3: 50, 4: 30}
+        dynamic_period = ranges[period_num % 5]
+        
+        message = f"""
+🎲 <b>3中3预测（{next_expect}期）</b>
+
+📊 预测{num_groups}组，每组3个号码
+📈 分析期数：{dynamic_period}期
+⏰ 预测时间：{datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S')}
+
+➖➖➖➖➖➖➖
+"""
+        
+        for idx, (numbers, scores) in enumerate(predictions, 1):
+            # Calculate average score for star rating
+            avg_score = sum(scores.values()) / len(scores)
+            stars = "⭐" * min(5, int(avg_score / 20))
+            recommend_pct = int(avg_score)
+            
+            message += f"""
+<b>第{idx}组</b> {stars} 推荐度{recommend_pct}%
+"""
+            for num in numbers:
+                zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
+                zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
+                message += f"🎯 <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac}\n"
+            
+            message += "➖➖➖➖➖➖➖\n"
+        
+        message += f"""
+⏰ 距离开奖：<code>{countdown}</code>
+
+✅ <b>预测已保存并锁定</b>
+💡 开奖后将自动统计命中情况
+
+⚠️ 预测仅供参考，请理性对待
+"""
+        
+        # Get hit stats
+        hit_stats = self.db.get_3in3_hit_stats(user_id, num_groups)
+        
+        if hit_stats['total'] > 0:
+            message += f"""
+
+➖➖➖➖➖➖➖
+📊 <b>{num_groups}组预测历史统计</b>
+
+总预测：{hit_stats['total']}期
+3中3命中：{hit_stats['hit_3in3']}期
+命中率：{hit_stats['hit_rate']:.1f}% 📈
+"""
+            if hit_stats['recent_5']['total'] > 0:
+                message += f"近5期：{hit_stats['recent_5']['hits']}/{hit_stats['recent_5']['total']} = {hit_stats['recent_5']['rate']:.1f}%\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 查看历史统计", callback_data="3in3_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="predict_3in3")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    async def show_existing_3in3_prediction(self, query, user_id: int, expect: str, num_groups: int):
+        """Show existing 3in3 prediction"""
+        record = self.db.get_3in3_prediction(user_id, expect, num_groups)
+        
+        if not record:
+            await query.answer("❌ 未找到预测记录", show_alert=True)
+            return
+        
+        countdown = self.get_countdown()
+        predictions = json.loads(record['predictions'])
+        
+        message = f"""
+🎲 <b>3中3预测（{expect}期）</b>
+
+📊 {num_groups}组预测
+⏰ 预测时间：{record['predict_time']}
+
+➖➖➖➖➖➖➖
+📊 预测状态：<b>✅ 已预测（已锁定）</b>
+
+➖➖➖➖➖➖➖
+"""
+        
+        # Show predictions
+        for idx, (numbers, scores) in enumerate(predictions, 1):
+            avg_score = sum(scores.values()) / len(scores)
+            stars = "⭐" * min(5, int(avg_score / 20))
+            recommend_pct = int(avg_score)
+            
+            message += f"""
+<b>第{idx}组</b> {stars} 推荐度{recommend_pct}%
+"""
+            for num in numbers:
+                zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
+                zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
+                message += f"🎯 <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac}\n"
+            
+            message += "➖➖➖➖➖➖➖\n"
+        
+        # Check if results are available
+        if record['is_checked'] and record['hit_results']:
+            actual_balls = json.loads(record['actual_balls'])
+            hit_results = json.loads(record['hit_results'])
+            
+            message += f"""
+
+🎰 <b>开奖结果</b>
+
+七色球：{', '.join(f"{str(int(n)).zfill(2)}" for n in actual_balls)}
+
+➖➖➖➖➖➖➖
+📊 <b>命中情况</b>
+
+"""
+            
+            has_3in3 = False
+            for idx, result in enumerate(hit_results, 1):
+                numbers_str = ', '.join(f"{str(int(n)).zfill(2)}" for n in result['numbers'])
+                hit_count = result['hit_count']
+                
+                if result['is_3in3']:
+                    message += f"<b>第{idx}组</b> ✅ 3中3！\n"
+                    message += f"预测：{numbers_str}\n"
+                    message += f"命中：{hit_count}/3 🎉\n\n"
+                    has_3in3 = True
+                else:
+                    message += f"<b>第{idx}组</b> 命中 {hit_count}/3\n"
+                    message += f"预测：{numbers_str}\n\n"
+            
+            if has_3in3:
+                message += "🎊 <b>恭喜！至少一组3中3！</b>\n"
+            else:
+                message += "💔 很遗憾，本期未中3中3\n"
+        else:
+            message += f"""
+
+⏰ 距离开奖：<code>{countdown}</code>
+
+💡 开奖后将自动统计命中情况
+"""
+        
+        message += "\n➖➖➖➖➖➖➖\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 查看历史统计", callback_data="3in3_history")],
+            [InlineKeyboardButton("🔙 返回", callback_data="predict_3in3")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_3in3_history(self, query):
+        """Show 3in3 prediction history statistics"""
+        user_id = query.from_user.id
+        
+        # Get stats for all group counts
+        stats_1 = self.db.get_3in3_hit_stats(user_id, 1)
+        stats_3 = self.db.get_3in3_hit_stats(user_id, 3)
+        stats_5 = self.db.get_3in3_hit_stats(user_id, 5)
+        stats_10 = self.db.get_3in3_hit_stats(user_id, 10)
+        
+        message = """
+📊 <b>3中3预测历史统计</b>
+
+➖➖➖➖➖➖➖
+"""
+        
+        if stats_1['total'] > 0:
+            message += f"""
+<b>1组预测</b>
+总预测：{stats_1['total']}期
+3中3命中：{stats_1['hit_3in3']}期
+命中率：{stats_1['hit_rate']:.1f}% 📈
+"""
+            if stats_1['recent_5']['total'] > 0:
+                message += f"近5期：{stats_1['recent_5']['hits']}/{stats_1['recent_5']['total']} = {stats_1['recent_5']['rate']:.1f}%\n"
+            message += "\n➖➖➖➖➖➖➖\n"
+        
+        if stats_3['total'] > 0:
+            message += f"""
+<b>3组预测</b>
+总预测：{stats_3['total']}期
+3中3命中：{stats_3['hit_3in3']}期
+命中率：{stats_3['hit_rate']:.1f}% 📈
+"""
+            if stats_3['recent_5']['total'] > 0:
+                message += f"近5期：{stats_3['recent_5']['hits']}/{stats_3['recent_5']['total']} = {stats_3['recent_5']['rate']:.1f}%\n"
+            message += "\n➖➖➖➖➖➖➖\n"
+        
+        if stats_5['total'] > 0:
+            message += f"""
+<b>5组预测</b>
+总预测：{stats_5['total']}期
+3中3命中：{stats_5['hit_3in3']}期
+命中率：{stats_5['hit_rate']:.1f}% 📈
+"""
+            if stats_5['recent_5']['total'] > 0:
+                message += f"近5期：{stats_5['recent_5']['hits']}/{stats_5['recent_5']['total']} = {stats_5['recent_5']['rate']:.1f}%\n"
+            message += "\n➖➖➖➖➖➖➖\n"
+        
+        if stats_10['total'] > 0:
+            message += f"""
+<b>10组预测</b>
+总预测：{stats_10['total']}期
+3中3命中：{stats_10['hit_3in3']}期
+命中率：{stats_10['hit_rate']:.1f}% 📈
+"""
+            if stats_10['recent_5']['total'] > 0:
+                message += f"近5期：{stats_10['recent_5']['hits']}/{stats_10['recent_5']['total']} = {stats_10['recent_5']['rate']:.1f}%\n"
+            message += "\n➖➖➖➖➖➖➖\n"
+        
+        if all(s['total'] == 0 for s in [stats_1, stats_3, stats_5, stats_10]):
+            message += """
+📝 暂无预测记录
+
+开始预测后，这里将显示详细的命中率统计
+
+➖➖➖➖➖➖➖
+"""
+        
+        message += """
+💡 <b>说明</b>
+• 每个组数独立统计
+• 只要任意一组3中3即算命中
+• 统计包含所有已开奖期数
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 返回", callback_data="predict_3in3")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1850,7 +2809,7 @@ class LotteryBot:
             zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
             percentage = (count / len(tema_list)) * 100
             bar = "█" * int(percentage * 2)
-            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次 ({percentage:.1f}%)\n"
+            message += f"{idx}. <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac} - {count}次 ({percentage:.1f}%)\n"
             message += f"   {bar}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
@@ -1895,7 +2854,7 @@ class LotteryBot:
                 status = "未出现"
             else:
                 status = f"{periods}期"
-            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {status}\n"
+            message += f"{idx}. <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac} - {status}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1912,13 +2871,13 @@ class LotteryBot:
         for idx, (num, count) in enumerate(analysis['hot'], 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
             zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
-            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次\n"
+            message += f"{idx}. <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac} - {count}次\n"
         
         message += "\n❄️ <b>冷号 Top 10：</b>\n"
         for idx, (num, count) in enumerate(analysis['cold'], 1):
             zodiac = NUMBER_TO_ZODIAC.get(num, '未知')
             zodiac_emoji = ZODIAC_EMOJI.get(zodiac, '')
-            message += f"{idx}. <b>{num:02d}</b> {zodiac_emoji}{zodiac} - {count}次\n"
+            message += f"{idx}. <b>{str(int(num)).zfill(2)}</b> {zodiac_emoji}{zodiac} - {count}次\n"
         
         keyboard = [[InlineKeyboardButton("🔙 返回分析菜单", callback_data="menu_analysis")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1963,7 +2922,7 @@ class LotteryBot:
         for i, tema in enumerate(recent_temas, 1):
             zodiac = NUMBER_TO_ZODIAC.get(tema, '未知')
             emoji = ZODIAC_EMOJI.get(zodiac, '')
-            message += f"{i}. <b>{tema:02d}</b> {emoji}{zodiac}\n"
+            message += f"{i}. <b>{str(int(tema)).zfill(2)}</b> {emoji}{zodiac}\n"
         
         message += f"""
 
@@ -2081,7 +3040,7 @@ class LotteryBot:
         
         if not_appeared:
             not_appeared_list = sorted(list(not_appeared))[:5]
-            not_appeared_str = ', '.join([f"{n:02d}" for n in not_appeared_list])
+            not_appeared_str = ', '.join([f"{str(int(n)).zfill(2)}" for n in not_appeared_list])
             message += f"• 示例：{not_appeared_str}\n"
         
         message += f"""
@@ -2156,7 +3115,7 @@ class LotteryBot:
         message = f"📜 <b>历史记录（最近{limit}期）</b>\n\n"
         
         for h in history[:10]:  # Show max 10 in one message
-            codes = ' '.join([f"{x:02d}" for x in h['open_code'][:6]])
+            codes = ' '.join([f"{str(int(x)).zfill(2)}" for x in h['open_code'][:6]])
             zodiac_emoji = ZODIAC_EMOJI.get(h['tema_zodiac'], '')
             message += f"<b>期号：</b>{h['expect']}\n"
             message += f"<b>号码：</b><code>{codes}</code>\n"
@@ -2238,7 +3197,7 @@ class LotteryBot:
             await query.edit_message_text("暂无开奖数据")
             return
         
-        codes = ' '.join([f"{x:02d}" for x in result['open_code'][:6]])
+        codes = ' '.join([f"{str(int(x)).zfill(2)}" for x in result['open_code'][:6]])
         zodiac_emoji = ZODIAC_EMOJI.get(result['tema_zodiac'], '')
         
         message = f"""
@@ -2342,6 +3301,11 @@ class LotteryBot:
                 InlineKeyboardButton("📜 历史记录", callback_data="menu_history"),
             ],
             [
+                InlineKeyboardButton("🔮 玄机预测图", callback_data="xuanji_menu"),
+            ],
+            
+            
+            [
                 InlineKeyboardButton("⚙️ 个人设置", callback_data="menu_settings"),
                 InlineKeyboardButton("❓ 帮助", callback_data="help"),
             ],
@@ -2350,7 +3314,7 @@ class LotteryBot:
         
         await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
     
-    async def check_new_result(self, context: ContextTypes.DEFAULT_TYPE):
+    async def check_new_result(self, context):
         """Check for new lottery result"""
         try:
             result = self.api.get_latest_result()
@@ -2385,20 +3349,136 @@ class LotteryBot:
             
             self.last_expect = expect
             
+
             # Update prediction result if exists
             self.db.update_prediction_result(expect, result['tema'], result['tema_zodiac'])
+            
+            # Check 3in3 predictions
+            self.db.check_3in3_results(expect)
             
             # Notify all users with notifications enabled
             await self.notify_users(result, context)
             
         except Exception as e:
+            import traceback
             logger.error(f"Error checking new result: {e}")
-    
+            logger.error(traceback.format_exc())
+    def generate_result_image(self, result: Dict) -> str:
+        """Generate result image like macaujc.com style"""
+        try:
+            # Image settings
+            width = 800
+            height = 300
+            bg_color = (255, 255, 255)
+            
+            # Create image
+            img = Image.new('RGB', (width, height), bg_color)
+            draw = ImageDraw.Draw(img)
+            
+            # Try to load font, fallback to default
+            try:
+                title_font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf", 32)
+                number_font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf", 48)
+                zodiac_font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 24)
+            except:
+                title_font = ImageFont.load_default()
+                number_font = ImageFont.load_default()
+                zodiac_font = ImageFont.load_default()
+            
+            # Color scheme (like macaujc.com)
+            colors = {
+                'red': (220, 53, 69),
+                'blue': (13, 110, 253),
+                'green': (25, 135, 84),
+            }
+            
+            # Draw title
+            title = f"新澳门六合彩  第 {result['expect']} 期"
+            draw.text((50, 30), title, fill=(0, 0, 0), font=title_font)
+            
+            # Draw numbers
+            codes = result['open_code'][:6]
+            tema = result['tema']
+            
+            # Number positions
+            box_size = 90
+            box_gap = 10
+            start_x = 50
+            start_y = 100
+            
+            # Draw 6 regular numbers
+            for i, num in enumerate(codes):
+                x = start_x + i * (box_size + box_gap)
+                
+                # Alternate colors (red/blue like the website)
+                color = colors['red'] if i % 2 == 0 else colors['blue']
+                
+                # Draw box
+                draw.rectangle([x, start_y, x + box_size, start_y + box_size], 
+                             fill=color, outline=(0, 0, 0), width=2)
+                
+                # Draw number
+                num_text = f"{str(int(num)).zfill(2)}"
+                bbox = draw.textbbox((0, 0), num_text, font=number_font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                text_x = x + (box_size - text_width) // 2
+                text_y = start_y + (box_size - text_height) // 2 - 10
+                draw.text((text_x, text_y), num_text, fill=(255, 255, 255), font=number_font)
+                
+                # Draw zodiac below number
+                zodiac = self.predictor.number_to_zodiac.get(num, '')
+                if zodiac:
+                    bbox = draw.textbbox((0, 0), zodiac, font=zodiac_font)
+                    text_width = bbox[2] - bbox[0]
+                    zodiac_x = x + (box_size - text_width) // 2
+                    draw.text((zodiac_x, start_y + box_size - 35), zodiac, 
+                            fill=(255, 255, 255), font=zodiac_font)
+            
+            # Draw "+" sign
+            plus_x = start_x + 6 * (box_size + box_gap) + 10
+            draw.text((plus_x, start_y + box_size // 2 - 20), "+", 
+                     fill=(0, 0, 0), font=number_font)
+            
+            # Draw special number (tema) in green
+            tema_x = plus_x + 40
+            draw.rectangle([tema_x, start_y, tema_x + box_size, start_y + box_size], 
+                         fill=colors['green'], outline=(0, 0, 0), width=2)
+            
+            # Draw tema number
+            tema_text = f"{str(int(tema)).zfill(2)}"
+            bbox = draw.textbbox((0, 0), tema_text, font=number_font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            text_x = tema_x + (box_size - text_width) // 2
+            text_y = start_y + (box_size - text_height) // 2 - 10
+            draw.text((text_x, text_y), tema_text, fill=(255, 255, 255), font=number_font)
+            
+            # Draw tema zodiac
+            tema_zodiac = result['tema_zodiac']
+            bbox = draw.textbbox((0, 0), tema_zodiac, font=zodiac_font)
+            text_width = bbox[2] - bbox[0]
+            zodiac_x = tema_x + (box_size - text_width) // 2
+            draw.text((zodiac_x, start_y + box_size - 35), tema_zodiac, 
+                    fill=(255, 255, 255), font=zodiac_font)
+            
+            # Save image
+            image_path = f"/tmp/result_{result['expect']}.png"
+            img.save(image_path)
+            return image_path
+            
+        except Exception as e:
+            logger.error(f"Error generating image: {e}")
+            return None 
+
     async def notify_users(self, result: Dict, context: ContextTypes.DEFAULT_TYPE):
         """Notify users about new result with prediction comparison"""
+        logger.info(f"[DEBUG] notify_users called")
+        logger.info(f"[DEBUG] result type: {type(result).__name__}")
+        logger.info(f"[DEBUG] result content: {result}")
         users = self.db.get_all_notify_users()
         
-        codes = ' '.join([f"{x:02d}" for x in result['open_code'][:6]])
+        codes = ' '.join([f"{str(int(x)).zfill(2)}" for x in result['open_code'][:6]])
         zodiac_emoji = ZODIAC_EMOJI.get(result['tema_zodiac'], '')
         
         # Check if there's a prediction for this period
@@ -2463,8 +3543,26 @@ class LotteryBot:
         keyboard = [[InlineKeyboardButton("🎯 预测下期", callback_data="ai_zodiac_predict")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        for user_id in users:
+        # Generate result image using tupian module
+        img_gen = ResultImageGenerator()
+        image_path = img_gen.generate(result)
+        
+        # Only notify admin
+        admin_id = int(os.getenv('ADMIN_USER_IDS', '0'))
+        if admin_id == 0:
+            logger.warning("ADMIN_USER_IDS not configured")
+            return
+        
+        for user_id in [admin_id]:
             try:
+                # Send image first
+                if image_path and os.path.exists(image_path):
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=open(image_path, 'rb')
+                    )
+                
+                # Then send text message
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=message,
@@ -2474,6 +3572,10 @@ class LotteryBot:
                 logger.info(f"Notified user {user_id}")
             except Exception as e:
                 logger.error(f"Error notifying user {user_id}: {e}")
+        
+        # Clean up image file
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
     
     async def send_reminder(self, context: ContextTypes.DEFAULT_TYPE):
         """Send reminder before lottery"""
@@ -2494,7 +3596,13 @@ class LotteryBot:
         keyboard = [[InlineKeyboardButton("🎯 立即预测", callback_data="menu_predict")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        for user_id in users:
+        # Only notify admin
+        admin_id = int(os.getenv('ADMIN_USER_IDS', '0'))
+        if admin_id == 0:
+            logger.warning("ADMIN_USER_IDS not configured")
+            return
+        
+        for user_id in [admin_id]:
             try:
                 await context.bot.send_message(
                     chat_id=user_id,
@@ -2511,14 +3619,14 @@ class LotteryBot:
         scheduler = AsyncIOScheduler(timezone=self.tz)
         
         # Check for new results
-        # Smart interval: 1 min during draw time, 5 min otherwise
-        scheduler.add_job(
-            self.smart_check,
-            IntervalTrigger(minutes=1),
-            args=[application],
-            id='smart_check'
-        )
-        
+        # Check for new results at 21:30-21:40 (every minute)
+        for m in range(30, 41):  # 30 到 40 分钟
+            scheduler.add_job(
+                self.smart_check,
+                CronTrigger(hour=21, minute=m, second=0, timezone=self.tz),
+                args=[application],
+                id=f'smart_check_{m}'
+            )
         # Daily reminder at 21:00
         scheduler.add_job(
             self.send_reminder,
@@ -2533,17 +3641,8 @@ class LotteryBot:
         return scheduler
     
     async def smart_check(self, application: Application):
-        """Smart check based on time"""
-        now = datetime.now(self.tz)
-        hour = now.hour
-        minute = now.minute
-        
-        # During draw time (21:30-21:40), check more frequently
-        if hour == 21 and 30 <= minute <= 40:
-            await self.check_new_result(application)
-        # Otherwise, check every 5 minutes
-        elif minute % 5 == 0:
-            await self.check_new_result(application)
+        """Smart check - always check for new results"""
+        await self.check_new_result(application)
     
     def run(self):
         """Run the bot"""
