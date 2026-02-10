@@ -34,6 +34,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
+from prediction_engine_ultimate import PredictionEngineUltimate
 
 # Load environment variables
 load_dotenv()
@@ -462,6 +463,9 @@ class DatabaseHandler:
     
     def update_prediction_result(self, expect: str, actual_tema: int, actual_zodiac: str):
         """Update prediction record with actual result"""
+        # Convert traditional Chinese to simplified Chinese
+        actual_zodiac = actual_zodiac.replace("龍", "龙").replace("馬", "马").replace("豬", "猪").replace("雞", "鸡")
+        
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -1524,6 +1528,7 @@ class LotteryBot:
         self.db = DatabaseHandler(DATABASE_PATH)
         self.api = APIHandler()
         self.predictor = PredictionEngine(self.db)
+        self.predictor_ultimate = PredictionEngineUltimate(self.db)
         self.tz = pytz.timezone(TIMEZONE)
         self.last_expect = None
         
@@ -1930,8 +1935,11 @@ class LotteryBot:
         await query.edit_message_text(progress_msg, parse_mode='HTML')
         await asyncio.sleep(1)
         
-        # Perform prediction with expect seed for variation
-        prediction = self.predictor.predict_top2_zodiac(100, next_expect)
+        # Perform prediction with ultimate engine (18 dimensions)
+        prediction = self.predictor_ultimate.predict_top2_zodiac(300, next_expect)
+        
+        # Get dynamic period from prediction
+        dynamic_period = prediction.get('period', 100)
         
         # Save to database
         self.db.save_zodiac_prediction(
